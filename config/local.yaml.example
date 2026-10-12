@@ -1,0 +1,26 @@
+# Másold config/local.yaml néven, és írd át. Az itt megadott értékek felülírják a default.yaml-t;
+# a SATRX_* környezeti változók (pl. SATRX_SERVER__PORT=9000) mindkettőnél erősebbek.
+# A telepítő szkriptek ezt a fájlt maguk is létrehozzák (tokennel).
+
+data_dir: data                 # adatbázis, naplók, alapértelmezett felvételi/eredmény mappák
+
+server:
+  host: 0.0.0.0                # csak a saját gépről: 127.0.0.1
+  port: 8000
+  auth_token: "cserald-le-egy-hosszu-veletlen-szovegre"   # üres = nincs védelem (csak megbízható hálózaton!)
+
+observer:                      # a megfigyelési pont; a webes felületen is megadható
+  lat: 47.4979
+  lon: 19.0402
+  alt_m: 120
+
+sdr:
+  backend: rtlsdr              # mock | replay | rtlsdr | soapy
+
+storage:
+  quota_gb: 50                 # ennyi adat után a megőrzés törölni kezdi a régi nyers IQ-t
+  iq_retention_days: 7         # 0 = nincs korhatár
+  artifact_retention_days: 0   # az eredmények (képek, hangok) törlése ennyi nap után; 0 = soha
+
+tools:
+  satdump_path: null           # pl. /usr/bin/satdump vagy C:\Program Files\SatDump\satdump.exe

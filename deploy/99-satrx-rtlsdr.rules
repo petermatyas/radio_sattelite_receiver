@@ -1,0 +1,4 @@
+# RTL-SDR (RTL2832U) hozzáférés a plugdev csoportnak, root nélkül.
+# Telepítés: /etc/udev/rules.d/99-satrx-rtlsdr.rules (a telepítő szkript megteszi)
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="2832", MODE="0660", GROUP="plugdev"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="2838", MODE="0660", GROUP="plugdev"

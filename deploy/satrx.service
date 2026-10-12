@@ -1,0 +1,35 @@
+[Unit]
+Description=satrx - automated satellite receiver
+Documentation=file://@INSTALL_DIR@/docs/RASPBERRY_PI.md
+After=network-online.target time-sync.target
+Wants=network-online.target time-sync.target
+
+[Service]
+# A szolgáltatás READY-t jelez, és a háttérszálból életjelet küld: ha megakad, a systemd újraindítja.
+Type=notify
+NotifyAccess=main
+WatchdogSec=180
+User=@USER@
+Group=@USER@
+# a plugdev csoport kell az RTL-SDR USB-eszközhöz (udev-szabály: 99-satrx-rtlsdr.rules)
+SupplementaryGroups=plugdev
+WorkingDirectory=@INSTALL_DIR@
+Environment=PYTHONUNBUFFERED=1
+Environment=SATRX_DATA_DIR=@DATA_DIR@
+ExecStart=@INSTALL_DIR@/.venv/bin/python -m satrx
+Restart=on-failure
+RestartSec=10
+# leálláskor a futó felvétel lezárására is idő kell
+TimeoutStopSec=60
+
+# Szigorítás: a külső meghajtók (/mnt, /media) írhatók maradnak, a rendszerkönyvtárak nem.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

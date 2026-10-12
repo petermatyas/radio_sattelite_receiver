@@ -1,0 +1,32 @@
+# Alapértelmezett konfiguráció. Felülírás: config/local.yaml vagy SATRX_* környezeti változók
+# (egymásba ágyazott kulcsok: SATRX_SERVER__PORT=9000).
+
+data_dir: data
+
+server:
+  host: 0.0.0.0
+  port: 8000
+  auth_token: null        # ha meg van adva, minden API hívás Bearer tokent kér
+
+observer:                 # megfigyelési pont - amíg nincs megadva, az átvonulás-számítás nem indul
+  lat: null
+  lon: null
+  alt_m: null
+
+scheduling:
+  default_min_elevation_deg: 10
+  buffer_before_s: 60
+  buffer_after_s: 60
+  allow_partial_recording: true
+
+storage:
+  quota_gb: 50
+  iq_retention_days: 7
+  artifact_retention_days: 0   # 0 = az eredményeket sosem törli automatikusan (a nyers IQ-t igen)
+
+sdr:
+  backend: mock           # mock | replay | rtlsdr | soapy
+  device_args: {}
+
+tools:
+  satdump_path: null
