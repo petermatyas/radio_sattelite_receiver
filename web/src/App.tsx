@@ -93,7 +93,7 @@ function RecordingsPage() {
   const { t } = useTranslation();
   const recs = useAsync<Recording[]>(() => api.recordings());
   const status = useAsync<RecorderStatus>(() => api.recorderStatus());
-  const [form, setForm] = useState({ freq: "145.800", rate: "250", bw: "", duration: "30", gain: "" });
+  const [form, setForm] = useState({ freq: "145.800", rate: "250", bw: "", duration: "30", gain: "", kind: "iq", fmMode: "fm", squelch: "0" });
   const [error, setError] = useState<string>();
   const pipelines = useAsync<Pipeline[]>(() => api.pipelines());
   const [pipelineId, setPipelineId] = useState("");
@@ -118,6 +118,16 @@ function RecordingsPage() {
   const start = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
+      if (form.kind === "fm") {
+        await api.startFmRecording({
+          center_freq_hz: Math.round(Number(form.freq) * 1e6), duration_s: Number(form.duration), mode: form.fmMode,
+          bandwidth_hz: Math.round(Number(form.bw || "12.5") * 1e3), gain_db: form.gain === "" ? null : Number(form.gain),
+          squelch: Number(form.squelch) || 0,
+        });
+        setError(undefined);
+        status.reload();
+        return;
+      }
       await api.startRecording({
         center_freq_hz: Math.round(Number(form.freq) * 1e6),
         sample_rate_hz: Math.round(Number(form.rate) * 1e3),
@@ -142,7 +152,20 @@ function RecordingsPage() {
   return (
     <>
       <form className="row" onSubmit={start}>
-        {field("freq", t("freqMhz"))}{field("rate", t("sampleRate"))}{field("bw", t("bandwidthKhz"), false)}
+        <label>{t("recKind")}
+          <select value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value })}>
+            <option value="iq">{t("recKindIq")}</option><option value="fm">{t("recKindFm")}</option>
+          </select>
+        </label>
+        {field("freq", t("freqMhz"))}{form.kind === "iq" && field("rate", t("sampleRate"))}{field("bw", t("bandwidthKhz"), false)}
+        {form.kind === "fm" && <>
+          <label>{t("demodMode")}
+            <select value={form.fmMode} onChange={(e) => setForm({ ...form, fmMode: e.target.value })}>
+              {["fm", "wbfm", "am", "usb", "lsb"].map((m) => <option key={m} value={m}>{m}</option>)}
+            </select>
+          </label>
+          {field("squelch", t("squelch"), false)}
+        </>}
         {field("duration", t("duration"))}{field("gain", t("gain"), false)}
         <button type="submit" disabled={busy}>{t("startRec")}</button>
         {busy && <button type="button" onClick={() => api.stopRecording().then(status.reload)}>{t("stopRec")}</button>}

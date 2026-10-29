@@ -54,6 +54,40 @@ def _probe_rtlsdr() -> SdrProbe:
                     [{"index": i, "serial": s} for i, s in enumerate(serials)])
 
 
+def _probe_rtl_tool(settings: Settings) -> SdrProbe:
+    import re
+    import subprocess
+
+    from satrx.tools import find_rtl_tool
+
+    sdr_cmd = find_rtl_tool("rtl_sdr", settings)
+    if sdr_cmd is None:
+        return SdrProbe("rtl_sdr", "no_tool", "The rtl_sdr program was not found (install the rtl-sdr tools)")
+    test = find_rtl_tool("rtl_test", settings)
+    if test is None:
+        return SdrProbe("rtl_sdr", "ok", f"rtl_sdr found: {sdr_cmd[0]} (rtl_test not found: the device list is unknown)")
+    try:
+        proc = subprocess.Popen([*test, "-t"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        try:
+            out, _ = proc.communicate(timeout=6)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            out, _ = proc.communicate()
+    except OSError as exc:
+        return SdrProbe("rtl_sdr", "probe_failed", str(exc))
+    text = out.decode("utf-8", "replace")
+    if "usb_claim_interface" in text:
+        return SdrProbe("rtl_sdr", "ok", "The RTL-SDR is busy (in use by another program)")
+    m = re.search(r"Found (\d+) device", text)
+    if not m or int(m.group(1)) == 0:
+        return SdrProbe("rtl_sdr", "not_found", "No RTL-SDR device was found")
+    devices = [{"index": int(i), "serial": "", "label": name.strip()}
+               for i, name in re.findall(r"^\s*(\d+):\s+(.+)$", text, re.M)]
+    if "Failed to open" in text:
+        return SdrProbe("rtl_sdr", "no_driver", text.strip().splitlines()[-1], devices)
+    return SdrProbe("rtl_sdr", "ok", f"{len(devices) or m.group(1)} RTL-SDR device(s) found", devices)
+
+
 def _probe_soapy() -> SdrProbe:
     try:
         import SoapySDR
@@ -77,6 +111,8 @@ def probe_sdr(settings: Settings) -> SdrProbe:
         return SdrProbe("replay", "replay", "Recorded files are played back instead of a real SDR")
     if backend == "rtlsdr":
         return _probe_rtlsdr()
+    if backend == "rtl_sdr":
+        return _probe_rtl_tool(settings)
     if backend == "soapy":
         return _probe_soapy()
     return SdrProbe(backend, "unknown_backend", f"Unknown SDR backend: {backend}")

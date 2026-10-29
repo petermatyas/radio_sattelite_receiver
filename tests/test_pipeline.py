@@ -487,10 +487,11 @@ def test_health_detailed_components(tmp_path):
 
         client.put("/api/settings/observer", json={"lat": 47.5, "lon": 19.0, "alt_m": 100})
         client.post("/api/satellites", json={"norad_id": 25544})
-        _rule(client)
+        _rule(client, valid_to=(datetime.now(timezone.utc) + timedelta(days=30)).isoformat())   # a mai naphoz képest aktív
         h = client.get("/api/health/detailed").json()
         comps = {c["id"]: c for c in h["components"]}
-        assert comps["tle"]["status"] == "ok" and comps["config"]["status"] == "ok"
+        # a tesztadat TLE-je rögzített korú: a valódi mai naphoz képest elavulhat, ez itt nem a vizsgált dolog
+        assert comps["tle"]["code"] != "no_satellites" and comps["config"]["status"] == "ok"
 
 
 def test_health_reports_stale_tle(env):

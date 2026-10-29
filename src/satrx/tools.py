@@ -69,3 +69,27 @@ def find_satdump(session: Session | None, settings: Settings) -> ToolInfo:
 def save_satdump_path(session: Session, value: str | None) -> None:
     session.merge(Setting(key=TOOLS_KEY, value={"satdump_path": value or None}))
     session.commit()
+
+
+def _rtl_locations(name: str) -> list[Path]:
+    exe = f"{name}.exe" if os.name == "nt" else name
+    if os.name == "nt":
+        roots = [os.environ.get(v) for v in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA", "USERPROFILE")]
+        dirs = [Path(r) / sub for r in roots if r for sub in ("rtl-sdr", "rtl-sdr-blog", "rtlsdr")]
+        dirs += [Path("C:/rtl-sdr"), Path("C:/rtl-sdr-release/x64"), Path("C:/rtlsdr")]
+        return [d / exe for d in dirs] + [d / "x64" / exe for d in dirs]
+    return [Path("/usr/bin") / exe, Path("/usr/local/bin") / exe]
+
+
+def find_rtl_tool(name: str, settings: Settings) -> list[str] | None:
+    """Az `rtl_sdr` / `rtl_fm` program keresése: beállított útvonal (tools.<name>_path) -> PATH -> szokásos helyek."""
+    configured = getattr(settings.tools, f"{name}_path", None)
+    if configured:
+        return _resolve(configured)
+    found = shutil.which(name)
+    if found:
+        return [found]
+    for path in _rtl_locations(name):
+        if path.is_file():
+            return [str(path)]
+    return None

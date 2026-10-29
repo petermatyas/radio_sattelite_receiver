@@ -146,8 +146,9 @@ _SDR_HINTS = {
                  "close other SDR programs that may hold the device",
     "not_found": "Check the USB connection; Linux: the dvb_usb_rtl28xxu module must be blacklisted and the udev rule installed; "
                  "Windows: install the WinUSB driver with Zadig",
+    "no_tool": "Install the rtl-sdr tools (Windows: https://github.com/rtlsdrblog/rtl-sdr-blog/releases, unzip and add the x64 folder to PATH or set tools.rtl_sdr_path; Linux: apt install rtl-sdr)",
     "probe_failed": "Check the driver and the USB connection",
-    "unknown_backend": "Use one of: mock, replay, rtlsdr, soapy",
+    "unknown_backend": "Use one of: mock, replay, rtlsdr, rtl_sdr, soapy",
 }
 
 

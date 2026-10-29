@@ -227,7 +227,7 @@ def test_health_warns_only_when_an_active_rule_needs_satdump(env, fake_satdump):
     client, _ = env
     config = lambda: next(c for c in client.get("/api/health/detailed").json()["components"] if c["id"] == "config")  # noqa: E731
     assert "satdump_missing" not in config()["details"].get("problems", [])           # a seed pipeline még nincs használatban
-    _rule(client, pipeline_id=_pipeline_id(client, "Meteor LRPT"))
+    _rule(client, pipeline_id=_pipeline_id(client, "Meteor LRPT"), valid_to=(datetime.now(timezone.utc) + timedelta(days=30)).isoformat())   # a valódi mai naphoz képest aktív
     assert "satdump_missing" in config()["details"]["problems"]
     client.put("/api/settings/tools", json={"satdump_path": str(fake_satdump.path)})
     assert "satdump_missing" not in config()["details"].get("problems", [])

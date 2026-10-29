@@ -46,12 +46,14 @@ class StorageConfig(BaseModel):
 
 
 class SdrConfig(BaseModel):
-    backend: Literal["mock", "replay", "rtlsdr", "soapy"] = "mock"
+    backend: Literal["mock", "replay", "rtlsdr", "rtl_sdr", "soapy"] = "mock"
     device_args: dict[str, Any] = Field(default_factory=dict)
 
 
 class ToolsConfig(BaseModel):
     satdump_path: str | None = None
+    rtl_sdr_path: str | None = None   # az rtl_sdr program (backend: rtl_sdr); üres = PATH
+    rtl_fm_path: str | None = None    # az rtl_fm program (közvetlen hangfelvétel); üres = PATH
 
 
 class Settings(BaseSettings):

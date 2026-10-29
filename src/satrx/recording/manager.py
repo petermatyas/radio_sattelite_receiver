@@ -62,7 +62,7 @@ class RecordingManager:
         self._live = live
         self._settings = settings
         self._sessions = session_factory
-        self._device_factory = device_factory or (lambda: create_device(settings.sdr))
+        self._device_factory = device_factory or (lambda: create_device(settings.sdr, settings))
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -131,6 +131,83 @@ class RecordingManager:
             )
             self._thread.start()
             return rec_id
+
+    def start_fm(self, spec, label: str | None = None) -> int:
+        """Közvetlen hangfelvétel az `rtl_fm` programmal (WAV az eredmények közé, nyers IQ nélkül). A job azonosítóját adja."""
+        from satrx.core.models import Artifact
+        from satrx.recording import rtlfm
+        from satrx.tools import find_rtl_tool
+
+        with self._lock:
+            if self._status.state != "idle":
+                raise BusyError("SDR is busy")
+            command = find_rtl_tool("rtl_fm", self._settings)
+            if command is None:
+                raise SdrError("The rtl_fm program was not found: install the rtl-sdr tools or set tools.rtl_fm_path in config/local.yaml")
+            if self._settings.sdr.backend in ("mock", "replay"):
+                raise SdrError("rtl_fm needs a real RTL-SDR (set sdr.backend to rtlsdr or rtl_sdr)")
+            root = self._storage.active("artifacts")
+            if not self._storage.available(root):
+                raise SdrError(f"The results storage location is not available: {root.path}")
+            now = datetime.now(timezone.utc)
+            slug = re.sub(r"[^A-Za-z0-9]+", "-", label or "").strip("-")[:30] or "manual"
+            rel = f"rtl_fm/{now:%Y%m%dT%H%M%SZ}_{slug}_{spec.center_hz}.wav"
+            subject = label or "rtl_fm"
+            with self._sessions() as session:
+                job = Job(device=DEVICE_ID, status="running", started_at=now)
+                session.add(job)
+                session.commit()
+                job_id = job.id
+            self._stop.clear()
+            self._subject = subject
+            self._status = RecorderStatus("recording", None, None, now, spec.duration_s, 0.0, None)
+            mhz = round(spec.center_hz / 1e6, 4)
+            if self._events is not None:
+                self._events.emit("info", "recorder", "recording_started",
+                                  f"Audio recording started (rtl_fm): {subject}, {mhz} MHz, {spec.duration_s:.0f} s",
+                                  {"subject": subject, "duration_s": round(spec.duration_s), "center_freq_hz": spec.center_hz,
+                                   "center_mhz": mhz, "source": "rtl_fm"}, job_id=job_id)
+
+            def run() -> None:
+                error: str | None = None
+                result = None
+                try:
+                    def progress(s: float) -> None:
+                        with self._lock:
+                            self._status.elapsed_s = s
+                    result = rtlfm.record_fm(command, spec, root.path / rel, self._stop, progress)
+                except Exception as exc:  # noqa: BLE001
+                    log.exception("rtl_fm recording failed")
+                    error = str(exc)
+                finally:
+                    done = datetime.now(timezone.utc)
+                    with self._sessions() as session:
+                        job = session.get(Job, job_id)
+                        job.finished_at, job.error = done, error
+                        job.status = "failed" if error else ("stopped" if result and result.stopped_early else "done")
+                        if result is not None and result.size_bytes > 0:
+                            session.add(Artifact(
+                                job_id=job_id, kind="audio", path=rel, root_id=root.id, size_bytes=result.size_bytes,
+                                meta={"mode": spec.mode, "sample_rate_hz": spec.audio_rate_hz, "duration_s": round(result.seconds, 1),
+                                      "bandwidth_hz": spec.bandwidth_hz, "center_freq_hz": spec.center_hz, "source": "rtl_fm",
+                                      "label": label, "gain_db": spec.gain_db, "squelch": spec.squelch}))
+                        session.commit()
+                    if self._events is not None:
+                        if error:
+                            self._events.emit("error", "recorder", "recording_failed", f"Recording failed: {error}",
+                                              {"error": error, "subject": subject}, job_id=job_id)
+                        elif result is not None:
+                            self._events.emit("info", "recorder", "recording_finished",
+                                              f"Audio recording finished: {subject}, {result.seconds:.1f} s",
+                                              {"subject": subject, "duration_s": round(result.seconds, 1),
+                                               "size_mb": round(result.size_bytes / 1e6, 1), "samples": 0,
+                                               "size_bytes": result.size_bytes}, job_id=job_id)
+                    with self._lock:
+                        self._status = RecorderStatus(last_error=error)
+
+            self._thread = threading.Thread(target=run, name="recorder-fm", daemon=True)
+            self._thread.start()
+            return job_id
 
     def stop(self) -> None:
         with self._lock:

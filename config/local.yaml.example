@@ -15,7 +15,8 @@ observer:                      # a megfigyelési pont; a webes felületen is meg
   alt_m: 120
 
 sdr:
-  backend: rtlsdr              # mock | replay | rtlsdr | soapy
+  backend: rtlsdr              # mock | replay | rtlsdr (pyrtlsdr) | rtl_sdr (az rtl_sdr program) | soapy
+  # device_args: {device_index: 0, ppm: 0}   # ppm: az RTL-SDR kvarcának hibája (rtlsdr és rtl_sdr backendnél)
 
 storage:
   quota_gb: 50                 # ennyi adat után a megőrzés törölni kezdi a régi nyers IQ-t
@@ -23,4 +24,6 @@ storage:
   artifact_retention_days: 0   # az eredmények (képek, hangok) törlése ennyi nap után; 0 = soha
 
 tools:
+  rtl_sdr_path: null           # az rtl_sdr program (backend: rtl_sdr); üres = PATH / szokásos helyek
+  rtl_fm_path: null            # az rtl_fm program (közvetlen hangfelvétel); üres = PATH / szokásos helyek
   satdump_path: null           # pl. /usr/bin/satdump vagy C:\Program Files\SatDump\satdump.exe

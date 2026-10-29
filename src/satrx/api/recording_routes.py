@@ -31,6 +31,17 @@ class StartRecording(BaseModel):
     norad_id: int | None = None
 
 
+class StartFmRecording(BaseModel):
+    center_freq_hz: int = Field(gt=0)
+    duration_s: float = Field(gt=0, le=3600)
+    mode: Literal["fm", "wbfm", "am", "usb", "lsb"] = "fm"
+    bandwidth_hz: int = Field(12_500, ge=1_000, le=250_000, description="az rtl_fm demodulátorának sávszélessége (-s)")
+    audio_rate_hz: int = Field(24_000, ge=8_000, le=48_000)
+    gain_db: float | None = None
+    squelch: int = Field(0, ge=0, le=500)
+    label: str | None = Field(None, max_length=60)
+
+
 class RecorderStatusOut(BaseModel):
     state: str
     recording_id: int | None
@@ -64,6 +75,23 @@ def _manager(request: Request) -> RecordingManager:
 @router.get("/recorder/status", response_model=RecorderStatusOut)
 def recorder_status(request: Request):
     return _manager(request).status()
+
+
+@router.post("/recorder/start-fm", status_code=202)
+def recorder_start_fm(body: StartFmRecording, request: Request, settings: Settings = Depends(get_settings_dep)):
+    """Közvetlen hangfelvétel az rtl_fm programmal: a WAV az eredmények (Galéria) közé kerül."""
+    from satrx.recording.rtlfm import FmSpec
+    args = settings.sdr.device_args if isinstance(settings.sdr.device_args, dict) else {}
+    try:
+        job_id = _manager(request).start_fm(
+            FmSpec(body.center_freq_hz, body.duration_s, body.mode, body.bandwidth_hz, body.audio_rate_hz, body.gain_db,
+                   body.squelch, int(args.get("ppm", 0)), int(args.get("device_index", 0))),
+            label=body.label)
+    except BusyError as exc:
+        raise HTTPException(409, str(exc))
+    except SdrError as exc:
+        raise HTTPException(422, str(exc))
+    return {"job_id": job_id}
 
 
 @router.post("/recorder/start", response_model=RecordingOut, status_code=202)

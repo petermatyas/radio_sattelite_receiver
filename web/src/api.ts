@@ -16,6 +16,9 @@ export interface RecorderStatus {
 export interface StartRecording {
   center_freq_hz: number; sample_rate_hz: number; duration_s: number; gain_db?: number | null; bandwidth_hz?: number | null;
 }
+export interface StartFmRecording {
+  center_freq_hz: number; duration_s: number; mode: string; bandwidth_hz: number; gain_db?: number | null; squelch: number; label?: string | null;
+}
 export interface Profile {
   id: number; name: string; center_freq_hz: number; bandwidth_hz: number; sample_rate_hz: number;
   gain_db: number | null; modulation_hint: string; doppler_correction: boolean; antenna_id: number | null;
@@ -177,6 +180,7 @@ export const api = {
   passes: (hours = 48) => request<Pass[]>("GET", `/api/passes?hours=${hours}`),
   recorderStatus: () => request<RecorderStatus>("GET", "/api/recorder/status"),
   startRecording: (b: StartRecording) => request<Recording>("POST", "/api/recorder/start", b),
+  startFmRecording: (b: StartFmRecording) => request<{ job_id: number }>("POST", "/api/recorder/start-fm", b),
   stopRecording: () => request<void>("POST", "/api/recorder/stop"),
   recordings: () => request<Recording[]>("GET", "/api/recordings"),
   deleteRecording: (id: number) => request<void>("DELETE", `/api/recordings/${id}`),
