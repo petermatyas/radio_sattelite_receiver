@@ -1,11 +1,12 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { api, Observer, Pass, Pipeline, RecorderStatus, Recording, Satellite, ToolsInfo } from "./api";
+import { api, Observer, Pass, Pipeline, Profile, RecorderStatus, Recording, Satellite, ToolsInfo } from "./api";
 import { fmt, mb, useAsync } from "./hooks";
 import DashboardPage from "./DashboardPage";
 import EventsPage from "./EventsPage";
 import GalleryPage from "./GalleryPage";
 import RecordingDetail from "./RecordingDetail";
+import SatelliteChannels from "./SatelliteChannels";
 import LiveWaterfall from "./LiveWaterfall";
 import PassTimeline from "./PassTimeline";
 import SchedulePage from "./SchedulePage";
@@ -23,11 +24,12 @@ function PassesPlan() {
   const { t } = useTranslation();
   const [hours, setHours] = useState(48);
   const [view, setView] = useState<"timeline" | "table">("timeline");
-  const passes = useAsync<Pass[]>(() => api.passes(hours));
+  const [showAll, setShowAll] = useState(true);
+  const passes = useAsync<Pass[]>(() => api.passes(hours, showAll));
   const observer = useAsync<Observer | null>(() => api.observer());
   const { tick } = useStream();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(passes.reload, [hours, tick]);
+  useEffect(passes.reload, [hours, tick, showAll]);
   useEffect(() => {
     const id = setInterval(passes.reload, 30000);
     return () => clearInterval(id);
@@ -44,10 +46,14 @@ function PassesPlan() {
             <option value={48}>48 {t("hoursShort")}</option><option value={168}>7 {t("daysShort")}</option>
           </select>
         </label>
+        <label className="inline">
+          <input type="checkbox" checked={showAll} onChange={(e) => setShowAll(e.target.checked)} />
+          {t("showUnscheduled")}
+        </label>
         <button className={`tab ${view === "timeline" ? "active" : ""}`} onClick={() => setView("timeline")}>{t("timeline")}</button>
         <button className={`tab ${view === "table" ? "active" : ""}`} onClick={() => setView("table")}>{t("table")}</button>
       </div>
-      {view === "timeline" && <PassTimeline passes={passes.data ?? []} hours={hours} />}
+      {view === "timeline" && <PassTimeline passes={passes.data ?? []} hours={hours} onScheduled={passes.reload} />}
       {view === "table" && <table>
         <thead>
           <tr>
@@ -224,6 +230,7 @@ function RecordingsPage() {
 function SatellitesPage() {
   const { t } = useTranslation();
   const sats = useAsync<Satellite[]>(() => api.satellites());
+  const [open, setOpen] = useState<number>();
   const [noradId, setNoradId] = useState("");
   const [error, setError] = useState<string>();
   const [info, setInfo] = useState<string>();
@@ -250,7 +257,14 @@ function SatellitesPage() {
           <input value={noradId} onChange={(e) => setNoradId(e.target.value)} inputMode="numeric" pattern="[0-9]+" required />
         </label>
         <button type="submit">{t("add")}</button>
+        <span className="spacer" />
+        <button type="button" disabled={!sats.data?.length} onClick={() => run(async () => {
+          const r = await api.refreshAllTle();
+          const failed = r.results.filter((x) => x.error).map((x) => `${x.name}: ${x.error}`);
+          setInfo(t("tleAllDone", { updated: r.updated, total: r.total, failed: r.failed }) + (failed.length ? ` – ${failed.join("; ")}` : ""));
+        })}>{t("refreshAllTle")}</button>
       </form>
+      <p className="muted">{t("satFrequencyHint")}</p>
       {info && <p className="st-done">{info}</p>}
       {(error || sats.error) && <p className="err">{t("error")}: {error ?? sats.error}</p>}
       <table>
@@ -261,14 +275,16 @@ function SatellitesPage() {
         </thead>
         <tbody>
           {sats.data?.map((s) => (
-            <tr key={s.norad_id}>
+            <Fragment key={s.norad_id}>
+            <tr>
               <td>{s.name}</td>
               <td>{s.norad_id}</td>
               <td>{s.tle_epoch ? `${fmt(s.tle_epoch)} (${t("tleAgeHours", { n: Math.max(0, Math.round((now - new Date(s.tle_epoch).getTime()) / 3600_000)) })})` : "-"}</td>
               <td>
-                <input type="checkbox" checked={s.enabled} onChange={(e) => run(() => api.patchSatellite(s.norad_id, e.target.checked))} />
+                <input type="checkbox" checked={s.enabled} onChange={(e) => run(() => api.patchSatellite(s.norad_id, { enabled: e.target.checked }))} />
               </td>
               <td>
+                <button onClick={() => setOpen(open === s.norad_id ? undefined : s.norad_id)}>{t("frequencies")}</button>{" "}
                 <button onClick={() => run(async () => {
                   const r = await api.refreshTle(s.norad_id);
                   setInfo(t(r.changed ? "tleUpdated" : "tleUnchanged", { name: r.name, epoch: r.tle_epoch ? fmt(r.tle_epoch) : "-" }));
@@ -276,6 +292,8 @@ function SatellitesPage() {
                 <button onClick={() => run(() => api.deleteSatellite(s.norad_id))}>{t("remove")}</button>
               </td>
             </tr>
+            {open === s.norad_id && <tr><td colSpan={5}><SatelliteChannels noradId={s.norad_id} /></td></tr>}
+            </Fragment>
           ))}
         </tbody>
       </table>

@@ -1,13 +1,14 @@
 import type { TFunction } from "i18next";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { AppEvent } from "./api";
 
 export function useAsync<T>(fn: () => Promise<T>) {
   const [data, setData] = useState<T | undefined>();
   const [error, setError] = useState<string | undefined>();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const latest = useRef(fn);
+  latest.current = fn;                       // a reload mindig a legutóbbi renderelés függvényét hívja (friss paraméterek)
   const reload = useCallback(() => {
-    fn()
+    latest.current()
       .then((d) => { setData(d); setError(undefined); })
       .catch((e) => setError(String(e.message ?? e)));
   }, []);

@@ -3,17 +3,19 @@ import { useTranslation } from "react-i18next";
 import type { Pass } from "./api";
 import { fmt } from "./hooks";
 import { useNow } from "./stream";
+import SchedulePassPanel from "./SchedulePassPanel";
 
 const COLORS: Record<string, string> = {
-  planned: "#3a7bd5", partial: "#e0a030", skipped_conflict: "#8a8f98", unsupported: "#8a8f98", recording: "#d33",
+  planned: "#3a7bd5", unscheduled: "#8a8f9855", partial: "#e0a030", skipped_conflict: "#8a8f98", unsupported: "#8a8f98", recording: "#d33",
   processing: "#8e5bd0", done: "#2a9d3a", failed: "#8b1a1a", missed: "#b0762c",
 };
-const HATCHED = new Set(["skipped_conflict", "unsupported"]);   // nincs felvételi ablak: csak az átvonulás látszik
+const HATCHED = new Set(["skipped_conflict", "unsupported"]);
+const OUTLINED = new Set(["unscheduled"]);        // csak előrejelzés: nincs ütemezett felvétel   // nincs felvételi ablak: csak az átvonulás látszik
 const laneName = (p: Pass) => (p.kind === "event" ? `⏱ ${p.satellite_name}` : p.satellite_name);
 const LABEL_W = 150, ROW_H = 30, AXIS_H = 34, W = 1000;
 
 /** Naptár-/idővonal nézet: műholdanként egy sáv, az átvonulások a felvételi ablakukkal, színezve az állapotuk szerint. */
-export default function PassTimeline({ passes, hours }: { passes: Pass[]; hours: number }) {
+export default function PassTimeline({ passes, hours, onScheduled }: { passes: Pass[]; hours: number; onScheduled?: () => void }) {
   const { t } = useTranslation();
   const now = useNow(30_000);
   const [selected, setSelected] = useState<number>();
@@ -76,9 +78,10 @@ export default function PassTimeline({ passes, hours }: { passes: Pass[]; hours:
           if (x1 <= LABEL_W || x0 >= LABEL_W + plotW) return null;
           return (
             <rect
-              key={p.id} x={x0} y={AXIS_H + lane * ROW_H + 5} width={Math.max(5, x1 - x0)} height={ROW_H - 10} rx={3}
+              key={p.id} x={x0} y={AXIS_H + lane * ROW_H + 5} width={Math.max(7, x1 - x0)} height={ROW_H - 10} rx={3}
               fill={HATCHED.has(p.status) ? "url(#hatch)" : COLORS[p.status] ?? "#3a7bd5"}
-              stroke={p.id === selected ? "#fff" : "none"} strokeWidth={2} style={{ cursor: "pointer" }}
+              stroke={p.id === selected ? "#fff" : OUTLINED.has(p.status) ? "#8a8f98" : "none"} strokeWidth={2}
+              strokeDasharray={OUTLINED.has(p.status) && p.id !== selected ? "2 2" : undefined} style={{ cursor: "pointer" }}
               onClick={() => setSelected(p.id === selected ? undefined : p.id)}
             >
               <title>{`${laneName(p)}\n${fmt(p.aos)} – ${new Date(p.los).toLocaleTimeString()}\n${p.max_elevation_deg.toFixed(0)}° · ${t(`st_${p.status}`)}`}</title>
@@ -89,8 +92,8 @@ export default function PassTimeline({ passes, hours }: { passes: Pass[]; hours:
         <text x={x(now) + 4} y={AXIS_H + 10} fontSize="10" fill="#ff3cc8">{t("now")}</text>
       </svg>
       <div className="legend">
-        {["planned", "partial", "skipped_conflict", "recording", "processing", "done", "failed", "missed"].map((s) => (
-          <span key={s}><i style={{ background: HATCHED.has(s) ? "repeating-linear-gradient(45deg,#8a8f98,#8a8f98 2px,#8a8f9833 2px,#8a8f9833 5px)" : COLORS[s] }} />{t(`st_${s}`)}</span>
+        {["planned", "partial", "skipped_conflict", "unscheduled", "recording", "processing", "done", "failed", "missed"].map((s) => (
+          <span key={s}><i style={{ background: HATCHED.has(s) ? "repeating-linear-gradient(45deg,#8a8f98,#8a8f98 2px,#8a8f9833 2px,#8a8f9833 5px)" : COLORS[s], ...(OUTLINED.has(s) ? { border: "1px dashed #8a8f98" } : {}) }} />{t(`st_${s}`)}</span>
         ))}
       </div>
       {sel && (
@@ -101,6 +104,7 @@ export default function PassTimeline({ passes, hours }: { passes: Pass[]; hours:
             {" · "}{t("maxEl")}: {sel.max_elevation_deg.toFixed(1)}°
             {sel.rec_start && sel.rec_end && <> · {t("recWindow")}: {new Date(sel.rec_start).toLocaleTimeString()} – {new Date(sel.rec_end).toLocaleTimeString()}</>}
           </div>
+          {sel.status === "unscheduled" && sel.norad_id !== null && <SchedulePassPanel pass={sel} onDone={() => { setSelected(undefined); onScheduled?.(); }} />}
         </div>
       )}
       {passes.length === 0 && <p className="muted">{t("noPasses")}</p>}

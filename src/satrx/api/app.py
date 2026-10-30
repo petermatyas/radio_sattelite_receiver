@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 import satrx
 from satrx.api.deps import require_auth
 from satrx.api.config_routes import router as config_router
+from satrx.api.channel_routes import router as channel_router
 from satrx.api.ops_routes import router as ops_router
 from satrx.api.recording_routes import router as recording_router
 from satrx.api.routes import router
@@ -135,6 +136,7 @@ def create_app(settings: Settings | None = None, tle_fetcher=fetch_tle, startup_
     app.include_router(router)
     app.include_router(recording_router)
     app.include_router(config_router)
+    app.include_router(channel_router)
     app.include_router(ops_router)
     app.include_router(storage_router)
     app.include_router(stream_router)

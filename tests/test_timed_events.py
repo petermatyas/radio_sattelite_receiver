@@ -294,3 +294,150 @@ def test_tle_refresh_reports_whether_anything_changed(env):
     client, _ = env
     same = client.post("/api/satellites/25544/refresh-tle").json()
     assert same["changed"] is False and same["previous_epoch"] == same["tle_epoch"]
+
+
+def test_unscheduled_passes_are_listed_only_on_request_and_never_double_listed(env):
+    client, app = env
+    now = datetime.now(UTC)
+    from tests.test_scheduler import ISS_TEXT  # noqa: F401
+    plain = client.get("/api/passes", params={"hours": 168}).json()
+    assert plain == []                                                        # szabály nélkül nincs ütemezett átvonulás
+    extra = client.get("/api/passes", params={"hours": 168, "unscheduled": True}).json()
+    assert extra and all(p["status"] == "unscheduled" and p["id"] < 0 and p["norad_id"] == 25544 for p in extra)
+    assert [p["aos"] for p in extra] == sorted(p["aos"] for p in extra)
+    # szabály felvétele: az ütemezett átvonulások nem szerepelnek még egyszer ütemezetlenként
+    _rule(client, valid_from=now.isoformat(), valid_to=(now + timedelta(days=7)).isoformat())
+    app.state.scheduler.recompute()
+    both = client.get("/api/passes", params={"hours": 168, "unscheduled": True}).json()
+    sched = [p for p in both if p["status"] != "unscheduled"]
+    assert sched and not [u for u in both if u["status"] == "unscheduled"
+                          and any(s["aos"] < u["los"] and u["aos"] < s["los"] for s in sched)]
+
+
+def test_a_rule_without_profile_and_pipeline_uses_the_satellites_defaults(env):
+    client, _ = env
+    body = {"norad_id": 25544, "valid_from": T0.isoformat(), "valid_to": (T0 + timedelta(days=2)).isoformat()}
+    r = client.post("/api/rules", json=body)
+    assert r.status_code == 422 and "default" in r.text                       # nincs mit átvenni
+    assert client.patch("/api/satellites/25544", json={"default_profile_id": 999}).status_code == 422
+    sat = client.patch("/api/satellites/25544", json={"default_profile_id": 2, "default_pipeline_id": 1}).json()
+    assert sat["default_profile_id"] == 2 and sat["default_pipeline_id"] == 1 and sat["enabled"] is True
+    rule = client.post("/api/rules", json=body).json()
+    assert rule["profile_id"] == 2 and rule["pipeline_id"] == 1
+    # a kifejezetten megadott érték erősebb, az enabled átállítása nem törli az alapértékeket
+    assert client.post("/api/rules", json={**body, "profile_id": 1}).json()["profile_id"] == 1
+    assert client.patch("/api/satellites/25544", json={"enabled": False}).json()["default_profile_id"] == 2
+
+
+def test_satellite_channels_manage_the_profile_and_pipeline(env):
+    client, _ = env
+    opts = client.get("/api/channels/options").json()
+    assert "Robot36" in opts["sstv_modes"] and set(opts["modes"]) == {"fm", "sstv", "lrpt", "record"}
+    r = client.post("/api/satellites/25544/channels", json={"center_freq_hz": 145_800_000, "mode": "sstv",
+                                                            "settings": {"sstv_mode": "Robot36", "min_lines": 20}, "gain_db": 30})
+    assert r.status_code == 201, r.text
+    ch = r.json()
+    assert ch["name"].startswith("ISS") and ch["bandwidth_hz"] == 25_000 and ch["sample_rate_hz"] == 250_000 and ch["doppler"] is True
+    profile = next(p for p in client.get("/api/profiles").json() if p["id"] == ch["profile_id"])
+    pipeline = next(p for p in client.get("/api/pipelines").json() if p["id"] == ch["pipeline_id"])
+    assert profile["center_freq_hz"] == 145_800_000 and profile["gain_db"] == 30 and pipeline["mode"] == "sstv"
+    assert [s["processor"] for s in pipeline["steps"]] == ["fm_demod", "sstv"]
+    assert pipeline["steps"][1]["params"] == {"mode": "Robot36", "min_lines": 20}
+    assert pipeline["steps"][0]["params"]["bandwidth_hz"] == 25_000
+    # a pipeline lépései érvényesek a processzorok sémája szerint (a futtató ugyanígy ellenőrzi)
+    assert client.post("/api/rules", json={"norad_id": 25544, "valid_from": T0.isoformat(), "valid_to": (T0 + timedelta(days=2)).isoformat(),
+                                           "channel_id": ch["id"]}).json()["profile_id"] == ch["profile_id"]
+    # módosítás: a profil és a pipeline helyben frissül (a szabály követi)
+    upd = client.put(f"/api/channels/{ch['id']}", json={"center_freq_hz": 145_990_000, "mode": "fm", "name": "ISS hang",
+                                                        "settings": {"squelch_db": -40, "waterfall": True}}).json()
+    assert upd["profile_id"] == ch["profile_id"] and upd["name"] == "ISS hang"
+    pipeline = next(p for p in client.get("/api/pipelines").json() if p["id"] == ch["pipeline_id"])
+    assert [s["processor"] for s in pipeline["steps"]] == ["fm_demod", "waterfall"] and pipeline["steps"][0]["params"]["squelch_db"] == -40
+    # használatban lévő csatorna nem törölhető, a szabály nélküli igen
+    assert client.delete(f"/api/channels/{ch['id']}").status_code == 409
+    other = client.post("/api/satellites/25544/channels", json={"center_freq_hz": 137_100_000, "mode": "lrpt"}).json()
+    assert other["bandwidth_hz"] == 150_000 and other["keep_iq"] is False
+    n_profiles = len(client.get("/api/profiles").json())
+    assert client.delete(f"/api/channels/{other['id']}").status_code == 204
+    assert len(client.get("/api/profiles").json()) == n_profiles - 1
+
+
+def test_channel_validation_and_rule_fallback_to_the_first_channel(env):
+    client, _ = env
+    bad = [{"center_freq_hz": 145_800_000, "mode": "sstv", "settings": {"sstv_mode": "nope"}},
+           {"center_freq_hz": 145_800_000, "mode": "lrpt", "settings": {"lrpt_pipeline": "x"}},
+           {"center_freq_hz": 145_800_000, "settings": {"unknown": 1}},
+           {"center_freq_hz": 145_800_000, "bandwidth_hz": 900_000},
+           {"center_freq_hz": 145_800_000, "mode": "ssb"}]
+    for body in bad:
+        assert client.post("/api/satellites/25544/channels", json=body).status_code == 422, body
+    assert client.post("/api/satellites/1/channels", json={"center_freq_hz": 1}).status_code == 404
+    first = client.post("/api/satellites/25544/channels", json={"center_freq_hz": 145_800_000, "mode": "fm"}).json()
+    client.post("/api/satellites/25544/channels", json={"center_freq_hz": 145_990_000, "mode": "record"})
+    rule = client.post("/api/rules", json={"norad_id": 25544, "valid_from": T0.isoformat(),
+                                           "valid_to": (T0 + timedelta(days=2)).isoformat()}).json()
+    assert rule["profile_id"] == first["profile_id"] and rule["pipeline_id"] == first["pipeline_id"]
+    assert client.post("/api/rules", json={"norad_id": 25544, "valid_from": T0.isoformat(), "valid_to": (T0 + timedelta(days=2)).isoformat(),
+                                           "channel_id": 99999}).status_code == 422
+    # a műhold törlése a karbantartott profilokat és pipeline-okat is törli
+    before = len(client.get("/api/profiles").json())
+    assert client.delete("/api/satellites/25544").status_code == 204
+    assert len(client.get("/api/profiles").json()) == before - 2 and client.get("/api/channels").json() == []
+
+
+def test_refresh_all_tles_continues_after_a_failure(env):
+    client, app = env
+    from satrx.tle.client import TleError
+    from satrx.core.models import Satellite
+    with app.state.session_factory() as session:                 # a tesztadat-forrás csak az ISS-t ismeri: a második műholdat közvetlenül vesszük fel
+        session.add(Satellite(norad_id=57166, name="TESZT"))
+        session.commit()
+    real = app.state.tle_fetcher
+
+    def flaky(norad_id):
+        if norad_id == 57166:
+            raise TleError("boom")
+        return real(norad_id)
+
+    app.state.tle_fetcher = flaky
+    out = client.post("/api/satellites/refresh-tle").json()
+    assert out["total"] == 2 and out["failed"] == 1 and out["updated"] == 0
+    assert {r["norad_id"]: r["error"] for r in out["results"]} == {25544: None, 57166: "boom"}
+
+
+def test_celestrak_404_gives_a_clear_message():
+    import httpx
+    from satrx.tle.client import TleError, fetch_tle
+    client = httpx.Client(transport=httpx.MockTransport(lambda req: httpx.Response(404, text="No GP data found")))
+    with pytest.raises(TleError, match="no current orbital data for NORAD 40931"):
+        fetch_tle(40931, client)
+
+
+def test_one_predicted_pass_can_be_scheduled_with_a_chosen_channel(env):
+    client, app = env
+    ch1 = client.post("/api/satellites/25544/channels", json={"center_freq_hz": 145_800_000, "mode": "fm"}).json()
+    ch2 = client.post("/api/satellites/25544/channels", json={"center_freq_hz": 145_800_000, "mode": "sstv",
+                                                              "settings": {"sstv_mode": "Robot36"}}).json()
+    passes = client.get("/api/passes", params={"hours": 72, "unscheduled": True}).json()
+    assert len(passes) >= 3
+    target = passes[1]
+    r = client.post("/api/passes/schedule", json={"norad_id": 25544, "aos": target["aos"], "los": target["los"], "channel_id": ch2["id"]})
+    assert r.status_code == 201, r.text
+    assert r.json()["status"] == "planned"
+    after = client.get("/api/passes", params={"hours": 72, "unscheduled": True}).json()
+    planned = [p for p in after if p["status"] != "unscheduled"]
+    iso = lambda x: datetime.fromisoformat(x.replace("Z", "+00:00"))  # noqa: E731
+    assert len(planned) == 1 and abs((iso(planned[0]["aos"]) - iso(target["aos"])).total_seconds()) < 5   # csak ez az egy átvonulás lett ütemezve
+    assert len([p for p in after if p["status"] == "unscheduled"]) == len(passes) - 1  # a többi továbbra is ütemezetlen
+    rule = next(x for x in client.get("/api/rules").json() if x["id"] == r.json()["rule_id"])
+    assert rule["profile_id"] == ch2["profile_id"] and rule["pipeline_id"] == ch2["pipeline_id"] and rule["profile_id"] != ch1["profile_id"]
+    # érvénytelen kérések
+    assert client.post("/api/passes/schedule", json={"norad_id": 25544, "aos": target["los"], "los": target["aos"]}).status_code == 422
+    assert client.post("/api/passes/schedule", json={"norad_id": 25544, "aos": target["aos"], "los": target["los"], "channel_id": 9999}).status_code == 422
+    # olyan időablak, ahol nincs átvonulás: nem marad árva szabály
+    n_rules = len(client.get("/api/rules").json())
+    gap = passes[0]
+    from datetime import datetime as dt
+    mid = dt.fromisoformat(gap["los"].replace("Z", "+00:00")) + timedelta(minutes=20)
+    assert client.post("/api/passes/schedule", json={"norad_id": 25544, "aos": mid.isoformat(), "los": (mid + timedelta(minutes=5)).isoformat()}).status_code == 409
+    assert len(client.get("/api/rules").json()) == n_rules

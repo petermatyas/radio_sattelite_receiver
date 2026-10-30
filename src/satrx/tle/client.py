@@ -51,6 +51,12 @@ def fetch_tle(norad_id: int, client: httpx.Client | None = None) -> Tle:
         resp = client.get(CELESTRAK_URL, params={"CATNR": norad_id, "FORMAT": "tle"})
         resp.raise_for_status()
         return parse_tle(resp.text, norad_id)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            # a CelesTrak "No GP data found" válasza: nincs friss pályaadat (nem követett, lebomlott vagy nem létező objektum)
+            raise TleError(f"CelesTrak has no current orbital data for NORAD {norad_id} (the satellite may have decayed, "
+                           "is no longer tracked, or the ID is wrong)") from exc
+        raise TleError(f"TLE download failed for NORAD {norad_id}: HTTP {exc.response.status_code}") from exc
     except httpx.HTTPError as exc:
         raise TleError(f"TLE download failed for NORAD {norad_id}: {exc}") from exc
     finally:

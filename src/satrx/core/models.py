@@ -42,9 +42,31 @@ class Satellite(Base):
     tle_line2: Mapped[str | None] = mapped_column(String(80))
     tle_epoch: Mapped[datetime | None] = mapped_column(UTCDateTime())
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-    default_profile_id: Mapped[int | None] = mapped_column(ForeignKey("radio_profiles.id", ondelete="SET NULL"))
+    default_profile_id: Mapped[int | None] = mapped_column(ForeignKey("radio_profiles.id", ondelete="SET NULL"))  # a műhold frekvenciája
+    default_pipeline_id: Mapped[int | None] = mapped_column(
+        ForeignKey("pipelines.id", ondelete="SET NULL", name="fk_satellites_default_pipeline_id"))
 
     rules: Mapped[list[WatchRule]] = relationship(back_populates="satellite", cascade="all, delete-orphan")
+
+
+class SatelliteChannel(Base):
+    """Egy műhold egy frekvenciája és módja; a mögötte lévő profilt és pipeline-t a rendszer tartja karban."""
+
+    __tablename__ = "satellite_channels"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    norad_id: Mapped[int] = mapped_column(ForeignKey("satellites.norad_id", ondelete="CASCADE", name="fk_satellite_channels_norad_id"), index=True)
+    name: Mapped[str] = mapped_column(String(120), default="")
+    mode: Mapped[str] = mapped_column(String(16), default="fm")  # fm | sstv | lrpt | record
+    center_freq_hz: Mapped[int] = mapped_column(Integer)
+    bandwidth_hz: Mapped[int] = mapped_column(Integer)
+    sample_rate_hz: Mapped[int] = mapped_column(Integer)
+    gain_db: Mapped[float | None] = mapped_column(Float)
+    doppler: Mapped[bool] = mapped_column(Boolean, default=True)
+    keep_iq: Mapped[bool] = mapped_column(Boolean, default=True)
+    settings: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # a módhoz tartozó beállítások
+    profile_id: Mapped[int | None] = mapped_column(Integer)      # a karbantartott rádióprofil és pipeline
+    pipeline_id: Mapped[int | None] = mapped_column(Integer)
 
 
 class Antenna(Base):

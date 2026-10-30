@@ -9,7 +9,8 @@ from sqlalchemy.orm import Session
 
 from satrx.api.deps import get_session, get_settings_dep, require_auth
 from satrx.core.config import Settings
-from satrx.core.models import Pass, Satellite
+from satrx.core.models import Pass, Pipeline, RadioProfile, Satellite, SatelliteChannel
+from satrx.passes.predictor import predict_passes
 from satrx.passes.service import get_observer, set_observer
 from satrx.scheduler.service import Scheduler
 from satrx.tle import service as tle_service
@@ -24,6 +25,8 @@ class SatelliteOut(BaseModel):
     name: str
     tle_epoch: datetime | None
     enabled: bool
+    default_profile_id: int | None = None
+    default_pipeline_id: int | None = None
 
 
 class SatelliteIn(BaseModel):
@@ -36,7 +39,9 @@ class SatelliteRefreshOut(SatelliteOut):
 
 
 class SatellitePatch(BaseModel):
-    enabled: bool
+    enabled: bool | None = None
+    default_profile_id: int | None = None     # a műhold frekvenciája (rádióprofil); a szabályok ezt veszik alapnak
+    default_pipeline_id: int | None = None
 
 
 class PassOut(BaseModel):
@@ -96,7 +101,14 @@ def add_satellite(body: SatelliteIn, request: Request, session: Session = Depend
 @router.patch("/satellites/{norad_id}", response_model=SatelliteOut)
 def patch_satellite(norad_id: int, body: SatellitePatch, request: Request, session: Session = Depends(get_session)):
     sat = _get_sat(session, norad_id)
-    sat.enabled = body.enabled
+    for key, value in body.model_dump(exclude_unset=True).items():       # a nem küldött mező változatlan marad
+        if key == "enabled" and value is None:
+            continue
+        if key == "default_profile_id" and value is not None and session.get(RadioProfile, value) is None:
+            raise HTTPException(422, f"RadioProfile {value} does not exist")
+        if key == "default_pipeline_id" and value is not None and session.get(Pipeline, value) is None:
+            raise HTTPException(422, f"Pipeline {value} does not exist")
+        setattr(sat, key, value)
     session.commit()
     scheduler_of(request).recompute()
     return sat
@@ -104,9 +116,34 @@ def patch_satellite(norad_id: int, body: SatellitePatch, request: Request, sessi
 
 @router.delete("/satellites/{norad_id}", status_code=204)
 def delete_satellite(norad_id: int, request: Request, session: Session = Depends(get_session)):
-    session.delete(_get_sat(session, norad_id))
+    sat = _get_sat(session, norad_id)
+    owned = [(c.profile_id, c.pipeline_id) for c in session.scalars(select(SatelliteChannel).where(SatelliteChannel.norad_id == norad_id))]
+    session.delete(sat)
+    session.flush()
+    for profile_id, pipeline_id in owned:          # a csatornák karbantartott profiljai és pipeline-jai is törlődnek
+        for model, id_ in ((RadioProfile, profile_id), (Pipeline, pipeline_id)):
+            obj = session.get(model, id_)
+            if obj is not None:
+                session.delete(obj)
     session.commit()
     scheduler_of(request).recompute()
+
+
+@router.post("/satellites/refresh-tle")
+def refresh_all_tle(request: Request, session: Session = Depends(get_session)):
+    """Az összes műhold TLE-jének frissítése; egy hiba nem állítja meg a többit."""
+    results = []
+    for sat in session.scalars(select(Satellite).order_by(Satellite.name)).all():
+        previous = sat.tle_epoch
+        try:
+            tle_service.refresh_tle(session, sat, _fetcher(request))
+            results.append({"norad_id": sat.norad_id, "name": sat.name, "changed": sat.tle_epoch != previous, "error": None})
+        except TleError as exc:
+            session.rollback()
+            results.append({"norad_id": sat.norad_id, "name": sat.name, "changed": False, "error": str(exc)})
+    scheduler_of(request).recompute()
+    return {"results": results, "updated": sum(r["changed"] for r in results), "failed": sum(r["error"] is not None for r in results),
+            "total": len(results)}
 
 
 @router.post("/satellites/{norad_id}/refresh-tle", response_model=SatelliteRefreshOut)
@@ -136,18 +173,51 @@ def write_observer(body: ObserverIO, request: Request, session: Session = Depend
 
 
 @router.get("/passes", response_model=list[PassOut])
-def list_passes(hours: int = 48, session: Session = Depends(get_session)):
+def list_passes(hours: int = 48, unscheduled: bool = False, session: Session = Depends(get_session),
+                settings: Settings = Depends(get_settings_dep)):
     now = datetime.now(timezone.utc)
     rows = session.execute(
         select(Pass, Satellite.name).outerjoin(Satellite, Satellite.norad_id == Pass.norad_id)
         .where(Pass.los >= now - timedelta(hours=1), Pass.aos <= now + timedelta(hours=hours))
         .order_by(Pass.aos)
     ).all()
-    return [PassOut(id=p.id, norad_id=p.norad_id, satellite_name=name or p.label or "-", kind="event" if p.event_id else "pass",
-                    rule_id=p.rule_id, event_id=p.event_id, aos=p.aos, tca=p.tca,
-                    los=p.los, rec_start=p.rec_start, rec_end=p.rec_end,
-                    max_elevation_deg=p.max_elevation_deg, status=p.status)
-            for p, name in rows]
+    out = [PassOut(id=p.id, norad_id=p.norad_id, satellite_name=name or p.label or "-", kind="event" if p.event_id else "pass",
+                   rule_id=p.rule_id, event_id=p.event_id, aos=p.aos, tca=p.tca,
+                   los=p.los, rec_start=p.rec_start, rec_end=p.rec_end,
+                   max_elevation_deg=p.max_elevation_deg, status=p.status)
+           for p, name in rows]
+    if unscheduled:
+        out += _unscheduled_passes(session, settings, now, hours, rows)
+        out.sort(key=lambda p: p.aos)
+    return out
+
+
+def _unscheduled_passes(session: Session, settings: Settings, now: datetime, hours: int, scheduled) -> list[PassOut]:
+    """A TLE-vel rendelkező műholdak átvonulásai, amelyekhez nincs ütemezett felvétel (tájékoztató, nem kerül felvételre).
+
+    Azonosító: negatív szám (nem adatbázis-sor). Az ütemezett átvonulással átfedő előrejelzést kihagyjuk.
+    """
+    observer = get_observer(session, settings)
+    if observer is None:
+        return []
+    start, end = now - timedelta(hours=1), now + timedelta(hours=hours)
+    out: list[PassOut] = []
+    for sat in session.scalars(select(Satellite).order_by(Satellite.norad_id)):
+        if not (sat.tle_line1 and sat.tle_line2):
+            continue
+        taken = [(p.aos, p.los) for p, _ in scheduled if p.norad_id == sat.norad_id]
+        try:
+            predicted = predict_passes(sat.tle_line1, sat.tle_line2, observer, start, end,
+                                       settings.scheduling.default_min_elevation_deg, sat.name)
+        except Exception:  # noqa: BLE001 - egy hibás TLE nem vihet el az egész listát
+            continue
+        for p in predicted:
+            if any(a < p.los and p.aos < b for a, b in taken):
+                continue
+            out.append(PassOut(id=-(len(out) + 1), norad_id=sat.norad_id, satellite_name=sat.name, kind="pass", rule_id=None,
+                               aos=p.aos, tca=p.tca, los=p.los, rec_start=None, rec_end=None,
+                               max_elevation_deg=p.max_elevation_deg, status="unscheduled"))
+    return out
 
 
 @router.post("/passes/recompute")

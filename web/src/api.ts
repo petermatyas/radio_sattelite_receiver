@@ -1,4 +1,18 @@
-export interface Satellite { norad_id: number; name: string; tle_epoch: string | null; enabled: boolean }
+export interface Satellite {
+  norad_id: number; name: string; tle_epoch: string | null; enabled: boolean;
+  default_profile_id: number | null; default_pipeline_id: number | null;
+}
+export interface ChannelIn {
+  name: string; center_freq_hz: number; mode: "fm" | "sstv" | "lrpt" | "record"; bandwidth_hz?: number | null; sample_rate_hz?: number | null;
+  gain_db?: number | null; doppler?: boolean | null; keep_iq?: boolean | null; settings: Record<string, unknown>;
+}
+export interface Channel extends ChannelIn {
+  id: number; norad_id: number; bandwidth_hz: number; sample_rate_hz: number; doppler: boolean; keep_iq: boolean; profile_id: number; pipeline_id: number;
+}
+export interface ChannelOptions {
+  modes: string[]; defaults: Record<string, { bandwidth_hz: number; sample_rate_hz: number; doppler: boolean; keep_iq: boolean }>;
+  sstv_modes: string[]; lrpt_pipelines: string[];
+}
 export interface SatelliteRefresh extends Satellite { changed: boolean; previous_epoch: string | null }
 export interface Pass {
   id: number; norad_id: number | null; satellite_name: string; kind: "pass" | "event"; event_id: number | null;
@@ -31,7 +45,7 @@ export interface PipelineIn { name: string; mode: string; keep_iq: boolean; step
 export interface Processor { name: string; title: string; params_schema: Record<string, any> }
 export interface RuleIn {
   norad_id: number; valid_from: string; valid_to: string; min_elevation_deg: number | null;
-  priority: number; profile_id: number; pipeline_id: number; allow_partial: boolean; enabled: boolean;
+  priority: number; profile_id: number | null; pipeline_id: number | null; channel_id?: number | null; allow_partial: boolean; enabled: boolean;
 }
 export interface Rule extends RuleIn { id: number; satellite_name: string }
 export interface TimedEventIn {
@@ -178,10 +192,12 @@ async function request<T>(method: string, url: string, body?: unknown): Promise<
 export const api = {
   satellites: () => request<Satellite[]>("GET", "/api/satellites"),
   addSatellite: (norad_id: number) => request<Satellite>("POST", "/api/satellites", { norad_id }),
-  patchSatellite: (id: number, enabled: boolean) => request<Satellite>("PATCH", `/api/satellites/${id}`, { enabled }),
+  patchSatellite: (id: number, patch: Partial<Pick<Satellite, "enabled" | "default_profile_id" | "default_pipeline_id">>) =>
+    request<Satellite>("PATCH", `/api/satellites/${id}`, patch),
   deleteSatellite: (id: number) => request<void>("DELETE", `/api/satellites/${id}`),
+  refreshAllTle: () => request<{ updated: number; failed: number; total: number; results: { norad_id: number; name: string; changed: boolean; error: string | null }[] }>("POST", "/api/satellites/refresh-tle"),
   refreshTle: (id: number) => request<SatelliteRefresh>("POST", `/api/satellites/${id}/refresh-tle`),
-  passes: (hours = 48) => request<Pass[]>("GET", `/api/passes?hours=${hours}`),
+  passes: (hours = 48, unscheduled = false) => request<Pass[]>("GET", `/api/passes?hours=${hours}${unscheduled ? "&unscheduled=true" : ""}`),
   recorderStatus: () => request<RecorderStatus>("GET", "/api/recorder/status"),
   startRecording: (b: StartRecording) => request<Recording>("POST", "/api/recorder/start", b),
   startFmRecording: (b: StartFmRecording) => request<{ job_id: number }>("POST", "/api/recorder/start-fm", b),
@@ -200,6 +216,14 @@ export const api = {
   createRule: (r: RuleIn) => request<Rule>("POST", "/api/rules", r),
   updateRule: (id: number, r: RuleIn) => request<Rule>("PUT", `/api/rules/${id}`, r),
   deleteRule: (id: number) => request<void>("DELETE", `/api/rules/${id}`),
+  channels: (norad: number) => request<Channel[]>("GET", `/api/satellites/${norad}/channels`),
+  allChannels: () => request<Channel[]>("GET", "/api/channels"),
+  channelOptions: () => request<ChannelOptions>("GET", "/api/channels/options"),
+  createChannel: (norad: number, b: ChannelIn) => request<Channel>("POST", `/api/satellites/${norad}/channels`, b),
+  updateChannel: (id: number, b: ChannelIn) => request<Channel>("PUT", `/api/channels/${id}`, b),
+  deleteChannel: (id: number) => request<void>("DELETE", `/api/channels/${id}`),
+  schedulePass: (b: { norad_id: number; aos: string; los: string; channel_id?: number | null; priority?: number }) =>
+    request<{ rule_id: number; pass_id: number; status: string }>("POST", "/api/passes/schedule", b),
   timedEvents: () => request<TimedEvent[]>("GET", "/api/timed-events"),
   previewTimedEvent: (b: TimedEventIn) => request<TimedEventPreview>("POST", "/api/timed-events/preview", b),
   createTimedEvent: (b: TimedEventIn) => request<TimedEvent>("POST", "/api/timed-events", b),

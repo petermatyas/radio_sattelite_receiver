@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -13,7 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from satrx.api.deps import get_session, require_auth
-from satrx.core.models import Antenna, Pipeline, RadioProfile, Satellite, TimedEvent, WatchRule
+from satrx.core.models import Antenna, Pass, Pipeline, RadioProfile, Satellite, SatelliteChannel, TimedEvent, WatchRule
 from satrx.scheduler.occurrences import get_zone, next_occurrences
 
 router = APIRouter(prefix="/api", dependencies=[Depends(require_auth)])
@@ -193,8 +193,9 @@ class RuleIn(BaseModel):
     valid_to: datetime
     min_elevation_deg: float | None = Field(default=None, ge=0, le=90)
     priority: int = Field(default=0, ge=-100, le=100)
-    profile_id: int
-    pipeline_id: int
+    channel_id: int | None = None     # a műhold egy frekvenciája és módja (Műholdak oldal); ennek profilját és pipeline-ját veszi át
+    profile_id: int | None = None     # üres = a csatornából / a műhold alapértelmezettjéből
+    pipeline_id: int | None = None    # üres = a műhold alapértelmezett pipeline-ja
     allow_partial: bool = True
     enabled: bool = True
 
@@ -210,6 +211,8 @@ class RuleIn(BaseModel):
 class RuleOut(RuleIn):
     model_config = ConfigDict(from_attributes=True)
     id: int
+    profile_id: int
+    pipeline_id: int
     satellite_name: str = ""
 
 
@@ -220,10 +223,32 @@ def _rule_out(session: Session, rule: WatchRule) -> RuleOut:
     return out
 
 
-def _check_refs(session: Session, body: RuleIn) -> None:
-    for model, id_ in ((Satellite, body.norad_id), (RadioProfile, body.profile_id), (Pipeline, body.pipeline_id)):
-        if session.get(model, id_) is None:
-            raise HTTPException(422, f"{model.__name__} {id_} does not exist")
+def _check_refs(session: Session, body: RuleIn) -> dict:
+    """A hivatkozások ellenőrzése; az üres profil/pipeline a műhold alapértelmezettjéből töltődik. A kitöltött adatot adja."""
+    sat = session.get(Satellite, body.norad_id)
+    if sat is None:
+        raise HTTPException(422, f"Satellite {body.norad_id} does not exist")
+    data = body.model_dump()
+    channel_id = data.pop("channel_id", None)
+    channel = session.get(SatelliteChannel, channel_id) if channel_id is not None else None
+    if channel_id is not None and (channel is None or channel.norad_id != body.norad_id):
+        raise HTTPException(422, f"Channel {channel_id} does not belong to this satellite")
+    if channel is None and (data["profile_id"] is None or data["pipeline_id"] is None):
+        channel = session.scalars(select(SatelliteChannel).where(SatelliteChannel.norad_id == body.norad_id)
+                                  .order_by(SatelliteChannel.id)).first()       # nincs megadva: a műhold első csatornája
+    if channel is not None:
+        data["profile_id"] = data["profile_id"] or channel.profile_id
+        data["pipeline_id"] = data["pipeline_id"] or channel.pipeline_id
+    for key, model, fallback, label in (
+            ("profile_id", RadioProfile, sat.default_profile_id, "frequency (radio profile)"),
+            ("pipeline_id", Pipeline, sat.default_pipeline_id, "pipeline")):
+        if data[key] is None:
+            data[key] = fallback
+        if data[key] is None:
+            raise HTTPException(422, f"No {label} given and the satellite has no default: set it on the Satellites page")
+        if session.get(model, data[key]) is None:
+            raise HTTPException(422, f"{model.__name__} {data[key]} does not exist")
+    return data
 
 
 @router.get("/rules", response_model=list[RuleOut])
@@ -234,19 +259,55 @@ def list_rules(session: Session = Depends(get_session)):
 
 @router.post("/rules", response_model=RuleOut, status_code=201)
 def create_rule(body: RuleIn, request: Request, session: Session = Depends(get_session)):
-    _check_refs(session, body)
-    rule = WatchRule(**body.model_dump())
+    rule = WatchRule(**_check_refs(session, body))
     session.add(rule)
     _commit(session)
     _recompute(request)
     return _rule_out(session, rule)
 
 
+class SchedulePassIn(BaseModel):
+    norad_id: int
+    aos: datetime
+    los: datetime
+    channel_id: int | None = None       # a műhold egy frekvenciája és módja; üres = az első
+    profile_id: int | None = None
+    pipeline_id: int | None = None
+    priority: int = Field(default=0, ge=-100, le=100)
+    allow_partial: bool = True
+
+    @model_validator(mode="after")
+    def _check(self):
+        if self.aos.tzinfo is None or self.los.tzinfo is None:
+            raise ValueError("aos/los must include a timezone")
+        if self.los <= self.aos:
+            raise ValueError("los must be after aos")
+        return self
+
+
+@router.post("/passes/schedule", status_code=201)
+def schedule_pass(body: SchedulePassIn, request: Request, session: Session = Depends(get_session)) -> dict[str, Any]:
+    """Egyetlen átvonulás beütemezése (az idővonalon kiválasztva): egy rövid érvényességű szabály, amely csak ezt az átvonulást fogja át."""
+    pad = timedelta(seconds=60)
+    rule_in = RuleIn(norad_id=body.norad_id, valid_from=body.aos - pad, valid_to=body.los + pad, priority=body.priority,
+                     channel_id=body.channel_id, profile_id=body.profile_id, pipeline_id=body.pipeline_id,
+                     allow_partial=body.allow_partial)
+    rule = WatchRule(**_check_refs(session, rule_in))
+    session.add(rule)
+    _commit(session)
+    _recompute(request)
+    row = session.scalars(select(Pass).where(Pass.rule_id == rule.id).order_by(Pass.aos)).first()
+    if row is None:       # nem jött létre átvonulás (pl. az előrejelzés időközben elmozdult): a szabály ne maradjon árván
+        session.delete(rule)
+        _commit(session)
+        raise HTTPException(409, "The pass could not be scheduled (it is no longer predicted in that time window)")
+    return {"rule_id": rule.id, "pass_id": row.id, "status": row.status}
+
+
 @router.put("/rules/{id_}", response_model=RuleOut)
 def update_rule(id_: int, body: RuleIn, request: Request, session: Session = Depends(get_session)):
     rule = _get(session, WatchRule, id_)
-    _check_refs(session, body)
-    for k, v in body.model_dump().items():
+    for k, v in _check_refs(session, body).items():
         setattr(rule, k, v)
     _commit(session)
     _recompute(request)

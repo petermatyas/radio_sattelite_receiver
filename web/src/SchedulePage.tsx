@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { api, Pipeline, Profile, Rule, Satellite } from "./api";
+import { api, Channel, Pipeline, Profile, Rule, Satellite } from "./api";
 import { fmt, useAsync } from "./hooks";
 import PipelinesPage from "./PipelinesPage";
 import TimedEventsSection from "./TimedEventsSection";
@@ -86,9 +86,10 @@ function RulesSection() {
   const sats = useAsync<Satellite[]>(() => api.satellites());
   const profiles = useAsync<Profile[]>(() => api.profiles());
   const pipelines = useAsync<Pipeline[]>(() => api.pipelines());
+  const channels = useAsync<Channel[]>(() => api.allChannels());
   const now = new Date();
   const [form, setForm] = useState({
-    norad: "", profile: "", pipeline: "", from: toLocalInput(now),
+    norad: "", channel: "", profile: "", pipeline: "", from: toLocalInput(now),
     to: toLocalInput(new Date(now.getTime() + 7 * 86400000)), priority: "0", minEl: "", partial: true,
   });
   const [error, setError] = useState<string>();
@@ -98,8 +99,9 @@ function RulesSection() {
     try {
       await api.createRule({
         norad_id: Number(form.norad || sats.data?.[0]?.norad_id),
-        profile_id: Number(form.profile || profiles.data?.[0]?.id),
-        pipeline_id: Number(form.pipeline || pipelines.data?.[0]?.id),
+        channel_id: form.channel && form.channel !== "custom" ? Number(form.channel) : null,   // üres: a műhold első frekvenciája
+        profile_id: form.channel === "custom" && form.profile ? Number(form.profile) : null,
+        pipeline_id: form.channel === "custom" && form.pipeline ? Number(form.pipeline) : null,
         valid_from: new Date(form.from).toISOString(),
         valid_to: new Date(form.to).toISOString(),
         priority: Number(form.priority),
@@ -131,8 +133,21 @@ function RulesSection() {
       <h2>{t("rules")}</h2>
       <form className="row" onSubmit={add}>
         {select("norad", t("satellite"), sats.data)}
-        {select("profile", t("profile"), profiles.data)}
-        {select("pipeline", t("pipeline"), pipelines.data)}
+        {(() => {
+          const norad = Number(form.norad || sats.data?.[0]?.norad_id);
+          const own = channels.data?.filter((c) => c.norad_id === norad) ?? [];
+          return (
+            <label>{t("satFrequency")}
+              <select value={form.channel} onChange={(e) => setForm({ ...form, channel: e.target.value })}>
+                {own.length === 0 && <option value="">{t("noChannelsShort")}</option>}
+                {own.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                <option value="custom">{t("customChannel")}</option>
+              </select>
+            </label>
+          );
+        })()}
+        {form.channel === "custom" && select("profile", t("profile"), profiles.data)}
+        {form.channel === "custom" && select("pipeline", t("pipeline"), pipelines.data)}
         <label>{t("validFrom")}<input type="datetime-local" required value={form.from} onChange={(e) => setForm({ ...form, from: e.target.value })} /></label>
         <label>{t("validTo")}<input type="datetime-local" required value={form.to} onChange={(e) => setForm({ ...form, to: e.target.value })} /></label>
         <label>{t("priority")}<input type="number" value={form.priority} onChange={(e) => setForm({ ...form, priority: e.target.value })} style={{ width: "5rem" }} /></label>
