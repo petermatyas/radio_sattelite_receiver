@@ -4,6 +4,18 @@ import { api, Channel, Pass } from "./api";
 
 const MODE_KEY: Record<string, string> = { fm: "chMode_fm", sstv: "chMode_sstv", lrpt: "chMode_lrpt", record: "chMode_record" };
 
+/** Az idővonalról beütemezett egyedi átvonulás visszavonása. */
+export function UnschedulePanel({ pass, onDone }: { pass: Pass; onDone: () => void }) {
+  const { t } = useTranslation();
+  const [error, setError] = useState<string>();
+  return (
+    <div className="row" style={{ marginTop: ".6rem" }}>
+      <button onClick={() => api.unschedulePass(pass.id).then(onDone).catch((e) => setError(e.message))}>{t("unschedulePass")}</button>
+      {error && <span className="err">{error}</span>}
+    </div>
+  );
+}
+
 /** Egy előrejelzett (még nem ütemezett) átvonulás beütemezése: a műholdhoz rendelt frekvenciák és módok közül választva. */
 export default function SchedulePassPanel({ pass, onDone }: { pass: Pass; onDone: () => void }) {
   const { t } = useTranslation();

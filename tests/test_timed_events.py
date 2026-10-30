@@ -81,7 +81,7 @@ def test_timezone_validation_and_next_occurrences():
 
 def body(**over):
     base = {"name": "Teszt jeladó", "start_at": (T0 + timedelta(hours=1)).isoformat(), "duration_s": 600,
-            "profile_id": 1, "pipeline_id": 1}
+            "center_freq_hz": 145_800_000, "steps": []}
     return {**base, **over}
 
 
@@ -92,7 +92,8 @@ def test_timed_event_crud_validation_and_output(env):
     out = r.json()
     start_local = datetime.fromisoformat(out["start_at"].replace("Z", "+00:00")).astimezone(ZoneInfo(BUD))
     assert out["weekdays"] == [start_local.weekday()]                          # weekly + üres lista: a kezdő nap
-    assert out["profile_name"].startswith("ISS") and out["pipeline_name"] == "Record only"
+    assert out["profile_name"].startswith("Teszt jeladó [event#") and out["pipeline_name"] == out["profile_name"]
+    assert out["bandwidth_hz"] == 25_000 and out["sample_rate_hz"] == 250_000 and out["steps"] == []
     assert out["estimated_bytes"] == 250_000 * 2 * 600 and out["id"] > 0
 
     upd = client.put(f"/api/timed-events/{out['id']}", json=body(recurrence="daily", repeat_until=(T0 + timedelta(days=9)).isoformat()))
@@ -112,8 +113,9 @@ def test_timed_event_crud_validation_and_output(env):
     ({"recurrence": "weekly", "weekdays": [7]}, "érvénytelen nap"),
     ({"recurrence": "yearly"}, "ismeretlen ismétlődés"),
     ({"recurrence": "daily", "repeat_until": (T0).isoformat()}, "a vége a kezdet előtt"),
-    ({"profile_id": 999}, "nincs ilyen profil"),
-    ({"pipeline_id": 999}, "nincs ilyen pipeline"),
+    ({"center_freq_hz": 0}, "nulla frekvencia"),
+    ({"bandwidth_hz": 900_000}, "a sávszélesség nagyobb a mintavételnél"),
+    ({"steps": [{"processor": "nincs_ilyen"}]}, "ismeretlen feldolgozó lépés"),
     ({"name": ""}, "üres név"),
     ({"priority": 500}, "túl nagy prioritás"),
 ])
@@ -201,9 +203,7 @@ def test_partial_overlap_is_allowed_for_events_only_when_requested(env):
 
 def test_an_event_with_an_unsupported_frequency_is_marked_unsupported(env):
     client, app = env
-    pid = client.post("/api/profiles", json={"name": "Túl magas", "center_freq_hz": 5_000_000_000, "bandwidth_hz": 20_000,
-                                              "sample_rate_hz": 250_000, "doppler_correction": False}).json()["id"]
-    client.post("/api/timed-events", json=body(start_at=(datetime.now(UTC) + timedelta(hours=1)).isoformat(), profile_id=pid))
+    client.post("/api/timed-events", json=body(start_at=(datetime.now(UTC) + timedelta(hours=1)).isoformat(), center_freq_hz=5_000_000_000))
     assert [p.status for p in _passes(app) if p.event_id] == ["unsupported"]
 
 
@@ -211,9 +211,8 @@ def test_an_event_with_an_unsupported_frequency_is_marked_unsupported(env):
 
 def test_a_timed_event_is_recorded_processed_and_logged(env):
     client, app = env
-    fm_audio = next(p["id"] for p in client.get("/api/pipelines").json() if p["name"] == "FM audio")
     event = client.post("/api/timed-events", json=body(start_at=(T0 + timedelta(hours=1)).isoformat(), duration_s=8,
-                                                       pipeline_id=fm_audio, name="Földi jeladó 145.8")).json()
+                                                       steps=[{"processor": "fm_demod", "params": {}}], name="Földi jeladó 145.8")).json()
     sched = app.state.scheduler
     sched.recompute(now=T0)
     row = next(p for p in _passes(app) if p.event_id == event["id"])
@@ -248,8 +247,8 @@ def test_a_timed_event_is_recorded_processed_and_logged(env):
     assert started["details"]["subject"] == "Földi jeladó 145.8" and started["details"]["center_mhz"] == 145.8
     assert started["details"]["duration_s"] == 7 and started["level"] == "info"
     assert finished["details"]["duration_s"] == 7.0 and finished["details"]["size_mb"] == 3.5
-    assert log["pipeline_started"]["details"]["pipeline"] == "FM audio"
-    assert log["pipeline_done"]["details"] == {"pipeline": "FM audio", "artifacts": 1}
+    assert log["pipeline_started"]["details"]["pipeline"].startswith("Földi jeladó 145.8 [event#")
+    assert log["pipeline_done"]["details"]["artifacts"] == 1
     assert log["service_started"]["details"]["backend"] == "mock"
     ids = [e["id"] for e in client.get("/api/events", params={"limit": 50}).json()]
     assert ids == sorted(ids, reverse=True)                                              # időrendben kapható vissza
@@ -316,19 +315,16 @@ def test_unscheduled_passes_are_listed_only_on_request_and_never_double_listed(e
                           and any(s["aos"] < u["los"] and u["aos"] < s["los"] for s in sched)]
 
 
-def test_a_rule_without_profile_and_pipeline_uses_the_satellites_defaults(env):
+def test_a_rule_without_a_frequency_is_refused_and_explicit_values_win(env):
     client, _ = env
     body = {"norad_id": 25544, "valid_from": T0.isoformat(), "valid_to": (T0 + timedelta(days=2)).isoformat()}
     r = client.post("/api/rules", json=body)
-    assert r.status_code == 422 and "default" in r.text                       # nincs mit átvenni
-    assert client.patch("/api/satellites/25544", json={"default_profile_id": 999}).status_code == 422
-    sat = client.patch("/api/satellites/25544", json={"default_profile_id": 2, "default_pipeline_id": 1}).json()
-    assert sat["default_profile_id"] == 2 and sat["default_pipeline_id"] == 1 and sat["enabled"] is True
+    assert r.status_code == 422 and "frequency" in r.text                     # nincs frekvencia megadva a műholdnál
+    ch = client.post("/api/satellites/25544/channels", json={"center_freq_hz": 145_800_000, "mode": "fm"}).json()
     rule = client.post("/api/rules", json=body).json()
-    assert rule["profile_id"] == 2 and rule["pipeline_id"] == 1
-    # a kifejezetten megadott érték erősebb, az enabled átállítása nem törli az alapértékeket
-    assert client.post("/api/rules", json={**body, "profile_id": 1}).json()["profile_id"] == 1
-    assert client.patch("/api/satellites/25544", json={"enabled": False}).json()["default_profile_id"] == 2
+    assert rule["profile_id"] == ch["profile_id"] and rule["pipeline_id"] == ch["pipeline_id"]
+    assert client.post("/api/rules", json={**body, "profile_id": 1, "pipeline_id": 1}).json()["profile_id"] == 1     # a kifejezett érték erősebb
+    assert "default_profile_id" not in client.patch("/api/satellites/25544", json={"enabled": False}).json()
 
 
 def test_satellite_channels_manage_the_profile_and_pipeline(env):
@@ -431,7 +427,7 @@ def test_one_predicted_pass_can_be_scheduled_with_a_chosen_channel(env):
     iso = lambda x: datetime.fromisoformat(x.replace("Z", "+00:00"))  # noqa: E731
     assert len(planned) == 1 and abs((iso(planned[0]["aos"]) - iso(target["aos"])).total_seconds()) < 5   # csak ez az egy átvonulás lett ütemezve
     assert len([p for p in after if p["status"] == "unscheduled"]) == len(passes) - 1  # a többi továbbra is ütemezetlen
-    rule = next(x for x in client.get("/api/rules").json() if x["id"] == r.json()["rule_id"])
+    rule = next(x for x in client.get("/api/rules", params={"include_single": True}).json() if x["id"] == r.json()["rule_id"])
     assert rule["profile_id"] == ch2["profile_id"] and rule["pipeline_id"] == ch2["pipeline_id"] and rule["profile_id"] != ch1["profile_id"]
     # érvénytelen kérések
     assert client.post("/api/passes/schedule", json={"norad_id": 25544, "aos": target["los"], "los": target["aos"]}).status_code == 422
@@ -451,12 +447,6 @@ def test_review_fixes_managed_profiles_and_stable_ids(env):
     # a karbantartott profil / pipeline nem törölhető a Profilok / Pipeline-ok oldalról
     assert client.delete(f"/api/profiles/{ch['profile_id']}").status_code == 409
     assert client.delete(f"/api/pipelines/{ch['pipeline_id']}").status_code == 409
-    # időpontos esemény használja a csatorna profilját: a műhold törlése 409, nem 500
-    ev = client.post("/api/timed-events", json={"name": "x", "start_at": (datetime.now(UTC) + timedelta(hours=2)).isoformat(), "duration_s": 60,
-                                                "profile_id": ch["profile_id"], "pipeline_id": ch["pipeline_id"]})
-    assert ev.status_code == 201
-    assert client.delete("/api/satellites/25544").status_code == 409
-    client.delete(f"/api/timed-events/{ev.json()['id']}")
     # az ütemezetlen átvonulások azonosítója nem függ a lista hosszától
     long = {p["aos"][:16]: p["id"] for p in client.get("/api/passes", params={"hours": 72, "unscheduled": True}).json()}
     short = {p["aos"][:16]: p["id"] for p in client.get("/api/passes", params={"hours": 24, "unscheduled": True}).json()}
@@ -480,3 +470,116 @@ def test_rtl_sdr_backend_does_not_retune_during_a_pass():
     assert Scheduler._retune_step(SimpleNamespace(_settings=s)) == 10**9
     s.sdr = SdrConfig(backend="rtlsdr")
     assert Scheduler._retune_step(SimpleNamespace(_settings=s)) == s.scheduling.retune_step_hz
+
+
+def test_channel_processing_steps_can_be_customised(env):
+    client, _ = env
+    body = {"center_freq_hz": 145_800_000, "mode": "sstv"}
+    preset = client.post("/api/channels/preview-steps", json=body).json()["steps"]
+    assert [s["processor"] for s in preset] == ["fm_demod", "sstv"]
+    custom = [*preset, {"processor": "waterfall", "params": {}}]
+    ch = client.post("/api/satellites/25544/channels", json={**body, "steps": custom}).json()
+    assert [s["processor"] for s in ch["steps"]] == ["fm_demod", "sstv", "waterfall"]
+    pipeline = next(p for p in client.get("/api/pipelines").json() if p["id"] == ch["pipeline_id"])
+    assert [s["processor"] for s in pipeline["steps"]] == ["fm_demod", "sstv", "waterfall"]
+    assert client.post("/api/satellites/25544/channels", json={**body, "steps": [{"processor": "nincs_ilyen"}]}).status_code == 422
+    assert client.post("/api/satellites/25544/channels", json={**body, "steps": [{"processor": "sstv", "params": {"mode": "nope"}}]}).status_code == 422
+    # None = vissza az alapra (a mód előbeállítása)
+    back = client.put(f"/api/channels/{ch['id']}", json=body).json()
+    assert [s["processor"] for s in back["steps"]] == ["fm_demod", "sstv"]
+
+
+def test_timed_event_has_its_own_radio_settings_and_processing_steps(env):
+    client, _ = env
+    start = (datetime.now(UTC) + timedelta(hours=2)).isoformat()
+    base = {"name": "PMR", "start_at": start, "duration_s": 60, "center_freq_hz": 446_006_250}
+    assert client.post("/api/timed-events", json=base).status_code == 422                       # a kiértékelés megadása kötelező ([] = csak felvétel)
+    n_pipes, n_profiles = len(client.get("/api/pipelines").json()), len(client.get("/api/profiles").json())
+    ev = client.post("/api/timed-events", json={**base, "bandwidth_hz": 12_500, "sample_rate_hz": 250_000, "gain_db": 20,
+                                                "steps": [{"processor": "fm_demod", "params": {"bandwidth_hz": 12500}}]})
+    assert ev.status_code == 201, ev.text
+    ev = ev.json()
+    assert ev["steps"][0]["params"]["bandwidth_hz"] == 12500 and ev["pipeline_name"].startswith("PMR [event#")
+    profile = next(p for p in client.get("/api/profiles").json() if p["id"] == ev["profile_id"])
+    assert profile["center_freq_hz"] == 446_006_250 and profile["bandwidth_hz"] == 12_500 and profile["gain_db"] == 20
+    assert profile["doppler_correction"] is False
+    assert len(client.get("/api/pipelines").json()) == n_pipes + 1 and len(client.get("/api/profiles").json()) == n_profiles + 1
+    # módosítás: ugyanaz a profil és pipeline frissül (nem keletkezik újabb)
+    upd = client.put(f"/api/timed-events/{ev['id']}", json={**base, "center_freq_hz": 446_018_750, "steps": [], "name": "PMR 2"}).json()
+    assert upd["pipeline_id"] == ev["pipeline_id"] and upd["profile_id"] == ev["profile_id"] and upd["steps"] == []
+    assert upd["profile_name"].startswith("PMR 2 [event#")
+    assert next(p for p in client.get("/api/profiles").json() if p["id"] == ev["profile_id"])["center_freq_hz"] == 446_018_750
+    assert len(client.get("/api/pipelines").json()) == n_pipes + 1
+    # a karbantartott profil / pipeline a Profilok / Pipeline-ok oldalról nem törölhető, az esemény törlésével együtt törlődik
+    assert client.delete(f"/api/profiles/{ev['profile_id']}").status_code == 409
+    assert client.delete(f"/api/pipelines/{ev['pipeline_id']}").status_code == 409
+    client.delete(f"/api/timed-events/{ev['id']}")
+    assert len(client.get("/api/pipelines").json()) == n_pipes and len(client.get("/api/profiles").json()) == n_profiles
+
+
+def test_single_pass_rules_are_hidden_cancellable_and_cleaned_up(env):
+    client, app = env
+    client.post("/api/satellites/25544/channels", json={"center_freq_hz": 145_800_000, "mode": "fm"})
+    passes = client.get("/api/passes", params={"hours": 72, "unscheduled": True}).json()
+    target = passes[1]
+    r = client.post("/api/passes/schedule", json={"norad_id": 25544, "aos": target["aos"], "los": target["los"]}).json()
+    assert client.get("/api/rules").json() == []                                           # az egyedi szabály rejtett
+    assert [x["id"] for x in client.get("/api/rules", params={"include_single": True}).json()] == [r["rule_id"]]
+    planned = [p for p in client.get("/api/passes", params={"hours": 72}).json() if p["status"] == "planned"]
+    assert len(planned) == 1 and planned[0]["single"] is True
+    # általános szabályból származó átvonulás nem vonható vissza ezen az úton
+    general = client.post("/api/rules", json={"norad_id": 25544, "valid_from": T0.isoformat(),
+                                              "valid_to": (datetime.now(UTC) + timedelta(days=3)).isoformat()}).json()
+    assert client.post("/api/passes/999999/unschedule").status_code == 404
+    # visszavonás: az átvonulás újra ütemezetlen
+    client.delete(f"/api/rules/{general['id']}")
+    assert client.post(f"/api/passes/{planned[0]['id']}/unschedule").status_code == 200
+    after = client.get("/api/passes", params={"hours": 72, "unscheduled": True}).json()
+    assert not [p for p in after if p["status"] == "planned"] and len(after) == len(passes)
+    assert client.get("/api/rules", params={"include_single": True}).json() == []
+    # a lejárt egyedi szabályok 7 nap után törlődnek
+    from satrx.core.models import WatchRule
+    with app.state.session_factory() as session:
+        session.add(WatchRule(norad_id=25544, valid_from=T0 - timedelta(days=20), valid_to=T0 - timedelta(days=19), profile_id=1,
+                              pipeline_id=1, single_pass=True))
+        session.add(WatchRule(norad_id=25544, valid_from=T0 - timedelta(days=20), valid_to=T0 - timedelta(days=19), profile_id=1,
+                              pipeline_id=1, single_pass=False))
+        session.commit()
+    app.state.scheduler.recompute()
+    kept = client.get("/api/rules", params={"include_single": True}).json()
+    assert len(kept) == 1 and kept[0]["single_pass"] is False                              # csak az általános szabály maradt
+
+
+def test_migration_gives_existing_events_their_own_profile_and_pipeline(tmp_path):
+    import json
+    import sqlite3
+    from pathlib import Path
+
+    from alembic import command
+    from alembic.config import Config
+
+    import satrx
+    db = tmp_path / "old.db"
+    cfg = Config()
+    cfg.set_main_option("script_location", str(Path(satrx.__file__).resolve().parent / "migrations"))
+    cfg.set_main_option("sqlalchemy.url", f"sqlite:///{db}")
+    command.upgrade(cfg, "0009")
+    con = sqlite3.connect(db)
+    con.execute("INSERT INTO radio_profiles (name, center_freq_hz, bandwidth_hz, sample_rate_hz, gain_db, modulation_hint, doppler_correction) "
+                "VALUES ('regi profil', 446006250, 12500, 250000, 20, 'nfm', 1)")
+    con.execute("INSERT INTO pipelines (name, mode, steps, keep_iq) VALUES ('regi pipeline', 'fm', ?, 0)",
+                (json.dumps([{"processor": "fm_demod", "params": {}}]),))
+    con.execute("INSERT INTO timed_events (name, enabled, start_at, duration_s, recurrence, weekdays, timezone, profile_id, pipeline_id, priority, "
+                "allow_partial, notes, keep_iq) VALUES ('PMR', 1, '2026-10-12 08:00:00', 60, 'none', '[]', 'UTC', 1, 1, 0, 0, '', 1)")
+    con.commit()
+    con.close()
+    command.upgrade(cfg, "head")
+    con = sqlite3.connect(db)
+    ev = con.execute("SELECT profile_id, pipeline_id, center_freq_hz, bandwidth_hz, sample_rate_hz, gain_db, steps, keep_iq FROM timed_events").fetchone()
+    assert ev[0] != 1 and ev[1] != 1 and ev[2:6] == (446006250, 12500, 250000, 20.0) and ev[7] == 0
+    assert json.loads(ev[6]) == [{"processor": "fm_demod", "params": {}}]
+    names = [r[0] for r in con.execute("SELECT name FROM radio_profiles ORDER BY id")]
+    assert names == ["regi profil", "PMR [event#1]"]                       # a régi profil változatlan, az esemény másolatot kapott
+    cols = [r[1] for r in con.execute("PRAGMA table_info(satellites)")]
+    assert "default_profile_id" not in cols and "default_pipeline_id" not in cols
+    con.close()

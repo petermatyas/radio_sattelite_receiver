@@ -24,6 +24,10 @@ def _refuse_if_managed(session: Session, column, id_: int) -> None:
     ch = session.scalars(select(SatelliteChannel).where(column == id_)).first()
     if ch is not None:
         raise HTTPException(409, f"It belongs to the frequency '{ch.name}' of a satellite: delete or change it on the Satellites page")
+    event_column = TimedEvent.profile_id if column is SatelliteChannel.profile_id else TimedEvent.pipeline_id
+    ev = session.scalars(select(TimedEvent).where(event_column == id_)).first()
+    if ev is not None:
+        raise HTTPException(409, f"It belongs to the timed recording '{ev.name}': delete or change that instead")
 
 
 def _commit(session: Session) -> None:
@@ -203,8 +207,8 @@ class RuleIn(BaseModel):
     min_elevation_deg: float | None = Field(default=None, ge=0, le=90)
     priority: int = Field(default=0, ge=-100, le=100)
     channel_id: int | None = None     # a műhold egy frekvenciája és módja (Műholdak oldal); ennek profilját és pipeline-ját veszi át
-    profile_id: int | None = None     # üres = a csatornából / a műhold alapértelmezettjéből
-    pipeline_id: int | None = None    # üres = a műhold alapértelmezett pipeline-ja
+    profile_id: int | None = None     # üres = a csatornából (megadva: kifejezett érték)
+    pipeline_id: int | None = None
     allow_partial: bool = True
     enabled: bool = True
 
@@ -222,6 +226,7 @@ class RuleOut(RuleIn):
     id: int
     profile_id: int
     pipeline_id: int
+    single_pass: bool = False
     satellite_name: str = ""
 
 
@@ -248,21 +253,21 @@ def _check_refs(session: Session, body: RuleIn) -> dict:
     if channel is not None:
         data["profile_id"] = data["profile_id"] or channel.profile_id
         data["pipeline_id"] = data["pipeline_id"] or channel.pipeline_id
-    for key, model, fallback, label in (
-            ("profile_id", RadioProfile, sat.default_profile_id, "frequency (radio profile)"),
-            ("pipeline_id", Pipeline, sat.default_pipeline_id, "pipeline")):
+    for key, model in (("profile_id", RadioProfile), ("pipeline_id", Pipeline)):
         if data[key] is None:
-            data[key] = fallback
-        if data[key] is None:
-            raise HTTPException(422, f"No {label} given and the satellite has no default: set it on the Satellites page")
+            raise HTTPException(422, "The satellite has no frequency set: add one on the Satellites page (Frequencies and modes)")
         if session.get(model, data[key]) is None:
             raise HTTPException(422, f"{model.__name__} {data[key]} does not exist")
     return data
 
 
 @router.get("/rules", response_model=list[RuleOut])
-def list_rules(session: Session = Depends(get_session)):
-    rules = session.scalars(select(WatchRule).order_by(WatchRule.valid_from)).all()
+def list_rules(include_single: bool = False, session: Session = Depends(get_session)):
+    """Az egyedi (egy átvonulásra szóló) szabályok alapból rejtettek: a menetrend idővonalán látszanak és ott vonhatók vissza."""
+    q = select(WatchRule).order_by(WatchRule.valid_from)
+    if not include_single:
+        q = q.where(WatchRule.single_pass.is_(False))
+    rules = session.scalars(q).all()
     return [_rule_out(session, r) for r in rules]
 
 
@@ -301,7 +306,7 @@ def schedule_pass(body: SchedulePassIn, request: Request, session: Session = Dep
     rule_in = RuleIn(norad_id=body.norad_id, valid_from=body.aos - pad, valid_to=body.los + pad, priority=body.priority,
                      channel_id=body.channel_id, profile_id=body.profile_id, pipeline_id=body.pipeline_id,
                      allow_partial=body.allow_partial)
-    rule = WatchRule(**_check_refs(session, rule_in))
+    rule = WatchRule(**_check_refs(session, rule_in), single_pass=True)
     session.add(rule)
     _commit(session)
     _recompute(request)
@@ -311,6 +316,23 @@ def schedule_pass(body: SchedulePassIn, request: Request, session: Session = Dep
         _commit(session)
         raise HTTPException(409, "The pass could not be scheduled (it is no longer predicted in that time window)")
     return {"rule_id": rule.id, "pass_id": row.id, "status": row.status}
+
+
+@router.post("/passes/{pass_id}/unschedule")
+def unschedule_pass(pass_id: int, request: Request, session: Session = Depends(get_session)) -> dict[str, Any]:
+    """Az idővonalról beütemezett egyedi átvonulás visszavonása. Általános szabályból származó átvonulást nem érint."""
+    row = session.get(Pass, pass_id)
+    rule = session.get(WatchRule, row.rule_id) if row is not None and row.rule_id is not None else None
+    if row is None:
+        raise HTTPException(404, "Pass not found")
+    if rule is None or not rule.single_pass:
+        raise HTTPException(409, "This pass comes from a general rule or an event: edit or delete that instead")
+    if row.status in ("recording", "processing", "done", "failed"):
+        raise HTTPException(409, f"The pass can no longer be cancelled (status: {row.status})")
+    session.delete(rule)
+    _commit(session)
+    _recompute(request)
+    return {"cancelled": True}
 
 
 @router.put("/rules/{id_}", response_model=RuleOut)
@@ -341,8 +363,12 @@ class TimedEventIn(BaseModel):
     weekdays: list[int] = Field(default_factory=list)
     repeat_until: datetime | None = None
     timezone: str = "UTC"
-    profile_id: int
-    pipeline_id: int
+    center_freq_hz: int = Field(gt=0)
+    bandwidth_hz: int | None = Field(None, gt=0)          # üres = 25 kHz
+    sample_rate_hz: int | None = Field(None, gt=0)        # üres = 250 kS/s
+    gain_db: float | None = None                          # üres = automatikus erősítés
+    steps: list[dict[str, Any]]                           # a kiértékelés lépései; [] = csak a nyers felvétel
+    keep_iq: bool = True
     priority: int = Field(default=0, ge=-100, le=100)
     allow_partial: bool = False
     notes: str = ""
@@ -363,12 +389,18 @@ class TimedEventIn(BaseModel):
             raise ValueError("repeat_until must be after start_at")
         if self.recurrence == "none":
             self.repeat_until = None
+        self.bandwidth_hz = self.bandwidth_hz or 25_000
+        self.sample_rate_hz = self.sample_rate_hz or 250_000
+        if self.bandwidth_hz > self.sample_rate_hz:
+            raise ValueError("bandwidth_hz must not exceed sample_rate_hz")
         return self
 
 
 class TimedEventOut(TimedEventIn):
     model_config = ConfigDict(from_attributes=True)
     id: int
+    profile_id: int
+    pipeline_id: int
     next_occurrences: list[datetime] = Field(default_factory=list)
     estimated_bytes: int | None = None     # egy előfordulás nyers IQ-ja (cu8 becslés)
     profile_name: str = ""
@@ -381,15 +413,43 @@ def _event_out(session: Session, ev: TimedEvent) -> TimedEventOut:
     pipeline = session.get(Pipeline, ev.pipeline_id)
     out.profile_name = profile.name if profile else ""
     out.pipeline_name = pipeline.name if pipeline else ""
-    out.estimated_bytes = profile.sample_rate_hz * 2 * ev.duration_s if profile else None
+    out.steps = ev.steps if ev.steps is not None else (pipeline.steps if pipeline else [])
+    out.estimated_bytes = ev.sample_rate_hz * 2 * ev.duration_s
     out.next_occurrences = next_occurrences(ev, datetime.now(dt_timezone.utc), 5)
     return out
 
 
-def _check_event_refs(session: Session, body: TimedEventIn) -> None:
-    for model, id_ in ((RadioProfile, body.profile_id), (Pipeline, body.pipeline_id)):
-        if session.get(model, id_) is None:
-            raise HTTPException(422, f"{model.__name__} {id_} does not exist")
+def _check_event(request: Request, body: TimedEventIn) -> None:
+    _validate_steps(request, body.steps)
+
+
+def _sync_event(session: Session, ev: TimedEvent | None, body: TimedEventIn) -> TimedEvent:
+    """Az esemény saját rádióprofilját és pipeline-ját hozza létre / frissíti a megadott beállításokból."""
+    import uuid
+    profile = session.get(RadioProfile, ev.profile_id) if ev is not None else None
+    pipeline = session.get(Pipeline, ev.pipeline_id) if ev is not None else None
+    tmp = f"{body.name} [event#{uuid.uuid4().hex[:8]}]"
+    if profile is None:
+        profile = RadioProfile(name=tmp, center_freq_hz=body.center_freq_hz, bandwidth_hz=body.bandwidth_hz, sample_rate_hz=body.sample_rate_hz)
+        session.add(profile)
+    if pipeline is None:
+        pipeline = Pipeline(name=tmp, mode="timed", steps=[], keep_iq=True)
+        session.add(pipeline)
+    profile.center_freq_hz, profile.bandwidth_hz, profile.sample_rate_hz = body.center_freq_hz, body.bandwidth_hz, body.sample_rate_hz
+    profile.gain_db, profile.doppler_correction, profile.modulation_hint = body.gain_db, False, ""
+    pipeline.mode, pipeline.steps, pipeline.keep_iq = "timed", body.steps, body.keep_iq
+    session.flush()
+    fields = body.model_dump(exclude={"steps"})
+    if ev is None:
+        ev = TimedEvent(**fields, steps=body.steps, profile_id=profile.id, pipeline_id=pipeline.id)
+        session.add(ev)
+    else:
+        for k, v in fields.items():
+            setattr(ev, k, v)
+        ev.steps, ev.profile_id, ev.pipeline_id = body.steps, profile.id, pipeline.id
+    session.flush()
+    profile.name = pipeline.name = f"{body.name} [event#{ev.id}]"
+    return ev
 
 
 @router.get("/timed-events", response_model=list[TimedEventOut])
@@ -398,20 +458,17 @@ def list_timed_events(session: Session = Depends(get_session)):
 
 
 @router.post("/timed-events/preview")
-def preview_timed_event(body: TimedEventIn, session: Session = Depends(get_session)) -> dict[str, Any]:
+def preview_timed_event(body: TimedEventIn) -> dict[str, Any]:
     """Az űrlap alapján a következő előfordulások (mentés nélkül), hogy a beállítás azonnal ellenőrizhető legyen."""
-    _check_event_refs(session, body)
-    ev = TimedEvent(**body.model_dump())
-    profile = session.get(RadioProfile, body.profile_id)
+    ev = TimedEvent(**body.model_dump(exclude={"steps"}), profile_id=0, pipeline_id=0)
     return {"next_occurrences": next_occurrences(ev, datetime.now(dt_timezone.utc), 8), "weekdays": body.weekdays,
-            "estimated_bytes": profile.sample_rate_hz * 2 * body.duration_s}
+            "estimated_bytes": body.sample_rate_hz * 2 * body.duration_s}
 
 
 @router.post("/timed-events", response_model=TimedEventOut, status_code=201)
 def create_timed_event(body: TimedEventIn, request: Request, session: Session = Depends(get_session)):
-    _check_event_refs(session, body)
-    ev = TimedEvent(**body.model_dump())
-    session.add(ev)
+    _check_event(request, body)
+    ev = _sync_event(session, None, body)
     _commit(session)
     _recompute(request)
     return _event_out(session, ev)
@@ -420,9 +477,8 @@ def create_timed_event(body: TimedEventIn, request: Request, session: Session = 
 @router.put("/timed-events/{id_}", response_model=TimedEventOut)
 def update_timed_event(id_: int, body: TimedEventIn, request: Request, session: Session = Depends(get_session)):
     ev = _get(session, TimedEvent, id_)
-    _check_event_refs(session, body)
-    for k, v in body.model_dump().items():
-        setattr(ev, k, v)
+    _check_event(request, body)
+    _sync_event(session, ev, body)
     _commit(session)
     _recompute(request)
     return _event_out(session, ev)
@@ -430,6 +486,12 @@ def update_timed_event(id_: int, body: TimedEventIn, request: Request, session: 
 
 @router.delete("/timed-events/{id_}", status_code=204)
 def delete_timed_event(id_: int, request: Request, session: Session = Depends(get_session)):
-    session.delete(_get(session, TimedEvent, id_))
+    ev = _get(session, TimedEvent, id_)
+    owned = [session.get(RadioProfile, ev.profile_id), session.get(Pipeline, ev.pipeline_id)]
+    session.delete(ev)
+    session.flush()
+    for obj in owned:                                   # az esemény saját profilja és pipeline-ja is törlődik
+        if obj is not None:
+            session.delete(obj)
     _commit(session)
     _recompute(request)

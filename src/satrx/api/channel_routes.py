@@ -38,6 +38,7 @@ class ChannelIn(BaseModel):
     keep_iq: bool | None = None
     # módhoz tartozó beállítások: fm: squelch_db, audio_lowpass_hz, waterfall; sstv: sstv_mode, min_lines; lrpt: lrpt_pipeline
     settings: dict[str, Any] = Field(default_factory=dict)
+    steps: list[dict[str, Any]] | None = None                  # a feldolgozó lépések; üres (None) = a módhoz tartozó alap
 
     @field_validator("settings")
     @classmethod
@@ -55,6 +56,7 @@ class ChannelIn(BaseModel):
 
 class ChannelOut(ChannelIn):
     model_config = ConfigDict(from_attributes=True)
+    steps: list[dict[str, Any]] | None = None      # kimenetben a ténylegesen futó lépések
     id: int
     norad_id: int
     name: str
@@ -66,7 +68,7 @@ class ChannelOut(ChannelIn):
     pipeline_id: int
 
 
-def pipeline_steps(ch: SatelliteChannel) -> list[dict[str, Any]]:
+def preset_steps(ch: SatelliteChannel) -> list[dict[str, Any]]:
     s = ch.settings or {}
     fm_bw = float(min(max(ch.bandwidth_hz, 1_000), 100_000))
     if ch.mode == "fm":
@@ -84,6 +86,10 @@ def pipeline_steps(ch: SatelliteChannel) -> list[dict[str, Any]]:
     if ch.mode == "lrpt":
         return [{"processor": "meteor_lrpt", "params": {"pipeline": s.get("lrpt_pipeline", "auto")}}]
     return []
+
+
+def pipeline_steps(ch: SatelliteChannel) -> list[dict[str, Any]]:
+    return ch.steps if ch.steps is not None else preset_steps(ch)
 
 
 def _auto_name(sat: Satellite, ch: SatelliteChannel) -> str:
@@ -119,8 +125,15 @@ def _apply(ch: SatelliteChannel, body: ChannelIn) -> None:
     ch.doppler = d["doppler"] if body.doppler is None else body.doppler
     ch.keep_iq = d["keep_iq"] if body.keep_iq is None else body.keep_iq
     ch.settings = body.settings
+    ch.steps = body.steps
     if ch.bandwidth_hz > ch.sample_rate_hz:
         raise HTTPException(422, "bandwidth_hz must not exceed sample_rate_hz")
+
+
+def _out(ch: SatelliteChannel) -> ChannelOut:
+    out = ChannelOut.model_validate(ch)
+    out.steps = pipeline_steps(ch)
+    return out
 
 
 def _sat(session: Session, norad_id: int) -> Satellite:
@@ -128,6 +141,23 @@ def _sat(session: Session, norad_id: int) -> Satellite:
     if sat is None:
         raise HTTPException(404, "Satellite not found")
     return sat
+
+
+def _validate(request: Request, steps: list[dict[str, Any]] | None) -> None:
+    if steps is None:
+        return
+    try:
+        request.app.state.runner.validate_steps(steps)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+
+
+@router.post("/channels/preview-steps")
+def preview_steps(body: ChannelIn) -> dict[str, Any]:
+    """A mód alap feldolgozó lépései (a szerkesztő kiindulópontja)."""
+    ch = SatelliteChannel(norad_id=0)
+    _apply(ch, body.model_copy(update={"steps": None}))
+    return {"steps": preset_steps(ch)}
 
 
 @router.get("/channels/options")
@@ -138,16 +168,17 @@ def channel_options() -> dict[str, Any]:
 @router.get("/satellites/{norad_id}/channels", response_model=list[ChannelOut])
 def list_channels(norad_id: int, session: Session = Depends(get_session)):
     _sat(session, norad_id)
-    return session.scalars(select(SatelliteChannel).where(SatelliteChannel.norad_id == norad_id).order_by(SatelliteChannel.id)).all()
+    return [_out(c) for c in session.scalars(select(SatelliteChannel).where(SatelliteChannel.norad_id == norad_id).order_by(SatelliteChannel.id))]
 
 
 @router.get("/channels", response_model=list[ChannelOut])
 def all_channels(session: Session = Depends(get_session)):
-    return session.scalars(select(SatelliteChannel).order_by(SatelliteChannel.norad_id, SatelliteChannel.id)).all()
+    return [_out(c) for c in session.scalars(select(SatelliteChannel).order_by(SatelliteChannel.norad_id, SatelliteChannel.id))]
 
 
 @router.post("/satellites/{norad_id}/channels", response_model=ChannelOut, status_code=201)
-def create_channel(norad_id: int, body: ChannelIn, session: Session = Depends(get_session)):
+def create_channel(norad_id: int, body: ChannelIn, request: Request, session: Session = Depends(get_session)):
+    _validate(request, body.steps)
     sat = _sat(session, norad_id)
     ch = SatelliteChannel(norad_id=norad_id)
     _apply(ch, body)
@@ -155,11 +186,12 @@ def create_channel(norad_id: int, body: ChannelIn, session: Session = Depends(ge
     session.flush()
     _sync(session, sat, ch)
     session.commit()
-    return ch
+    return _out(ch)
 
 
 @router.put("/channels/{channel_id}", response_model=ChannelOut)
 def update_channel(channel_id: int, body: ChannelIn, request: Request, session: Session = Depends(get_session)):
+    _validate(request, body.steps)
     ch = session.get(SatelliteChannel, channel_id)
     if ch is None:
         raise HTTPException(404, "Channel not found")
@@ -167,7 +199,7 @@ def update_channel(channel_id: int, body: ChannelIn, request: Request, session: 
     _sync(session, _sat(session, ch.norad_id), ch)
     session.commit()
     request.app.state.scheduler.recompute()              # a frekvencia / mód változása az ütemezett felvételeket is érinti
-    return ch
+    return _out(ch)
 
 
 @router.delete("/channels/{channel_id}", status_code=204)

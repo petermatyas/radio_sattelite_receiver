@@ -42,9 +42,6 @@ class Satellite(Base):
     tle_line2: Mapped[str | None] = mapped_column(String(80))
     tle_epoch: Mapped[datetime | None] = mapped_column(UTCDateTime())
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-    default_profile_id: Mapped[int | None] = mapped_column(ForeignKey("radio_profiles.id", ondelete="SET NULL"))  # a műhold frekvenciája
-    default_pipeline_id: Mapped[int | None] = mapped_column(
-        ForeignKey("pipelines.id", ondelete="SET NULL", name="fk_satellites_default_pipeline_id"))
 
     rules: Mapped[list[WatchRule]] = relationship(back_populates="satellite", cascade="all, delete-orphan")
 
@@ -65,6 +62,7 @@ class SatelliteChannel(Base):
     doppler: Mapped[bool] = mapped_column(Boolean, default=True)
     keep_iq: Mapped[bool] = mapped_column(Boolean, default=True)
     settings: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # a módhoz tartozó beállítások
+    steps: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON)  # a feldolgozó lépések; None = a módhoz tartozó alap
     profile_id: Mapped[int | None] = mapped_column(Integer)      # a karbantartott rádióprofil és pipeline
     pipeline_id: Mapped[int | None] = mapped_column(Integer)
 
@@ -117,6 +115,7 @@ class WatchRule(Base):
     pipeline_id: Mapped[int] = mapped_column(ForeignKey("pipelines.id"))
     allow_partial: Mapped[bool] = mapped_column(Boolean, default=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    single_pass: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")  # egyetlen átvonulásra szól (az idővonalról beütemezve)
 
     satellite: Mapped[Satellite] = relationship(back_populates="rules")
 
@@ -139,10 +138,16 @@ class TimedEvent(Base):
     weekdays: Mapped[list[int]] = mapped_column(JSON, default=list)       # weekly: 0 = hétfő ... 6 = vasárnap
     repeat_until: Mapped[datetime | None] = mapped_column(UTCDateTime())  # None: határozatlan ideig
     timezone: Mapped[str] = mapped_column(String(64), default="UTC")
-    profile_id: Mapped[int] = mapped_column(ForeignKey("radio_profiles.id"))
-    pipeline_id: Mapped[int] = mapped_column(ForeignKey("pipelines.id"))
+    profile_id: Mapped[int] = mapped_column(ForeignKey("radio_profiles.id"))   # az esemény saját, karbantartott profilja
+    pipeline_id: Mapped[int] = mapped_column(ForeignKey("pipelines.id"))      # az esemény saját, karbantartott pipeline-ja
+    center_freq_hz: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    bandwidth_hz: Mapped[int] = mapped_column(Integer, default=25_000, server_default="25000")
+    sample_rate_hz: Mapped[int] = mapped_column(Integer, default=250_000, server_default="250000")
+    gain_db: Mapped[float | None] = mapped_column(Float)
     priority: Mapped[int] = mapped_column(Integer, default=0)
     allow_partial: Mapped[bool] = mapped_column(Boolean, default=False)
+    steps: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON)  # megadva: az esemény saját (karbantartott) pipeline-ja
+    keep_iq: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
     notes: Mapped[str] = mapped_column(Text, default="")
 
 

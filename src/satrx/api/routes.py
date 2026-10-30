@@ -4,12 +4,12 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from satrx.api.deps import get_session, get_settings_dep, require_auth
 from satrx.core.config import Settings
-from satrx.core.models import Pass, Pipeline, RadioProfile, Satellite, SatelliteChannel, TimedEvent
+from satrx.core.models import Pass, Pipeline, RadioProfile, Satellite, SatelliteChannel, WatchRule
 from satrx.passes.predictor import predict_passes
 from satrx.passes.service import get_observer, set_observer
 from satrx.scheduler.service import Scheduler
@@ -25,8 +25,6 @@ class SatelliteOut(BaseModel):
     name: str
     tle_epoch: datetime | None
     enabled: bool
-    default_profile_id: int | None = None
-    default_pipeline_id: int | None = None
 
 
 class SatelliteIn(BaseModel):
@@ -39,9 +37,7 @@ class SatelliteRefreshOut(SatelliteOut):
 
 
 class SatellitePatch(BaseModel):
-    enabled: bool | None = None
-    default_profile_id: int | None = None     # a műhold frekvenciája (rádióprofil); a szabályok ezt veszik alapnak
-    default_pipeline_id: int | None = None
+    enabled: bool
 
 
 class PassOut(BaseModel):
@@ -49,6 +45,7 @@ class PassOut(BaseModel):
     norad_id: int | None
     satellite_name: str                  # időalapú eseménynél az esemény neve
     kind: str = "pass"                  # pass | event
+    single: bool = False                # egyetlen átvonulásra szóló (az idővonalról beütemezett) szabályból; visszavonható
     rule_id: int | None
     event_id: int | None = None
     aos: datetime
@@ -101,14 +98,7 @@ def add_satellite(body: SatelliteIn, request: Request, session: Session = Depend
 @router.patch("/satellites/{norad_id}", response_model=SatelliteOut)
 def patch_satellite(norad_id: int, body: SatellitePatch, request: Request, session: Session = Depends(get_session)):
     sat = _get_sat(session, norad_id)
-    for key, value in body.model_dump(exclude_unset=True).items():       # a nem küldött mező változatlan marad
-        if key == "enabled" and value is None:
-            continue
-        if key == "default_profile_id" and value is not None and session.get(RadioProfile, value) is None:
-            raise HTTPException(422, f"RadioProfile {value} does not exist")
-        if key == "default_pipeline_id" and value is not None and session.get(Pipeline, value) is None:
-            raise HTTPException(422, f"Pipeline {value} does not exist")
-        setattr(sat, key, value)
+    sat.enabled = body.enabled
     session.commit()
     scheduler_of(request).recompute()
     return sat
@@ -118,11 +108,6 @@ def patch_satellite(norad_id: int, body: SatellitePatch, request: Request, sessi
 def delete_satellite(norad_id: int, request: Request, session: Session = Depends(get_session)):
     sat = _get_sat(session, norad_id)
     owned = [(c.profile_id, c.pipeline_id) for c in session.scalars(select(SatelliteChannel).where(SatelliteChannel.norad_id == norad_id))]
-    for profile_id, pipeline_id in owned:
-        used = session.scalar(select(func.count()).select_from(TimedEvent).where(
-            (TimedEvent.profile_id == profile_id) | (TimedEvent.pipeline_id == pipeline_id))) or 0
-        if used:
-            raise HTTPException(409, f"{used} timed event(s) use this satellite's frequencies: delete those first")
     session.delete(sat)
     session.flush()
     for profile_id, pipeline_id in owned:          # a csatornák karbantartott profiljai és pipeline-jai is törlődnek
@@ -186,8 +171,9 @@ def list_passes(hours: int = 48, unscheduled: bool = False, session: Session = D
         .where(Pass.los >= now - timedelta(hours=1), Pass.aos <= now + timedelta(hours=hours))
         .order_by(Pass.aos)
     ).all()
+    single_rules = set(session.scalars(select(WatchRule.id).where(WatchRule.single_pass)))
     out = [PassOut(id=p.id, norad_id=p.norad_id, satellite_name=name or p.label or "-", kind="event" if p.event_id else "pass",
-                   rule_id=p.rule_id, event_id=p.event_id, aos=p.aos, tca=p.tca,
+                   single=p.rule_id in single_rules, rule_id=p.rule_id, event_id=p.event_id, aos=p.aos, tca=p.tca,
                    los=p.los, rec_start=p.rec_start, rec_end=p.rec_end,
                    max_elevation_deg=p.max_elevation_deg, status=p.status)
            for p, name in rows]

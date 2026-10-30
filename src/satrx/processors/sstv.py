@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, field_validator
+from typing import Literal
+
+from pydantic import BaseModel, Field
 
 from satrx.dsp.filters import DspError
 from satrx.dsp.sstv import decode_sstv, read_wav
@@ -9,17 +11,10 @@ from satrx.pipeline.base import ArtifactSpec, NoResult, PipelineContext, Process
 
 
 class SstvParams(BaseModel):
-    mode: str = Field("auto", description="SSTV mód; 'auto' = a VIS-kódból (vagy a szinkron-távolságból) felismerve")
+    mode: Literal[("auto", *MODE_NAMES)] = Field("auto", description="SSTV dekódolási mód; 'auto' = a VIS-kódból (vagy a szinkron-távolságból) felismerve")
     min_lines: int = Field(8, ge=2, description="Ennél kevesebb sorból álló képet eldob")
     offset_hz: float = Field(0.0, description="Csak ha nincs előző demodulátor-lépés: a belső FM-demodulátor eltolása")
     follow_doppler: bool = Field(True, description="Csak a belső FM-demodulátorhoz: Doppler-követés")
-
-    @field_validator("mode")
-    @classmethod
-    def _known_mode(cls, v: str) -> str:
-        if v != "auto" and v not in MODE_NAMES:
-            raise ValueError(f"mode must be 'auto' or one of {', '.join(MODE_NAMES)}")
-        return v
 
 
 class Sstv(Processor):

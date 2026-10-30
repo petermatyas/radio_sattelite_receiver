@@ -1,10 +1,8 @@
-export interface Satellite {
-  norad_id: number; name: string; tle_epoch: string | null; enabled: boolean;
-  default_profile_id: number | null; default_pipeline_id: number | null;
-}
+export interface Satellite { norad_id: number; name: string; tle_epoch: string | null; enabled: boolean }
 export interface ChannelIn {
   name: string; center_freq_hz: number; mode: "fm" | "sstv" | "lrpt" | "record"; bandwidth_hz?: number | null; sample_rate_hz?: number | null;
   gain_db?: number | null; doppler?: boolean | null; keep_iq?: boolean | null; settings: Record<string, unknown>;
+  steps?: PipelineStep[] | null;
 }
 export interface Channel extends ChannelIn {
   id: number; norad_id: number; bandwidth_hz: number; sample_rate_hz: number; doppler: boolean; keep_iq: boolean; profile_id: number; pipeline_id: number;
@@ -17,7 +15,7 @@ export interface SatelliteRefresh extends Satellite { changed: boolean; previous
 export interface Pass {
   id: number; norad_id: number | null; satellite_name: string; kind: "pass" | "event"; event_id: number | null;
   aos: string; tca: string; los: string; rec_start: string | null; rec_end: string | null;
-  max_elevation_deg: number; status: string;
+  max_elevation_deg: number; status: string; single?: boolean;
 }
 export interface Recording {
   id: number; norad_id: number | null; path: string; sample_format: string;
@@ -50,11 +48,13 @@ export interface RuleIn {
 export interface Rule extends RuleIn { id: number; satellite_name: string }
 export interface TimedEventIn {
   name: string; enabled: boolean; start_at: string; duration_s: number; recurrence: "none" | "daily" | "weekly";
-  weekdays: number[]; repeat_until: string | null; timezone: string; profile_id: number; pipeline_id: number;
+  weekdays: number[]; repeat_until: string | null; timezone: string;
+  center_freq_hz: number; bandwidth_hz?: number | null; sample_rate_hz?: number | null; gain_db?: number | null;
+  steps: PipelineStep[]; keep_iq?: boolean;
   priority: number; allow_partial: boolean; notes: string;
 }
 export interface TimedEvent extends TimedEventIn {
-  id: number; next_occurrences: string[]; estimated_bytes: number | null; profile_name: string; pipeline_name: string;
+  id: number; profile_id: number; pipeline_id: number; next_occurrences: string[]; estimated_bytes: number | null; profile_name: string; pipeline_name: string;
 }
 export interface TimedEventPreview { next_occurrences: string[]; weekdays: number[]; estimated_bytes: number }
 export interface HealthComponent {
@@ -192,8 +192,7 @@ async function request<T>(method: string, url: string, body?: unknown): Promise<
 export const api = {
   satellites: () => request<Satellite[]>("GET", "/api/satellites"),
   addSatellite: (norad_id: number) => request<Satellite>("POST", "/api/satellites", { norad_id }),
-  patchSatellite: (id: number, patch: Partial<Pick<Satellite, "enabled" | "default_profile_id" | "default_pipeline_id">>) =>
-    request<Satellite>("PATCH", `/api/satellites/${id}`, patch),
+  patchSatellite: (id: number, patch: { enabled: boolean }) => request<Satellite>("PATCH", `/api/satellites/${id}`, patch),
   deleteSatellite: (id: number) => request<void>("DELETE", `/api/satellites/${id}`),
   refreshAllTle: () => request<{ updated: number; failed: number; total: number; results: { norad_id: number; name: string; changed: boolean; error: string | null }[] }>("POST", "/api/satellites/refresh-tle"),
   refreshTle: (id: number) => request<SatelliteRefresh>("POST", `/api/satellites/${id}/refresh-tle`),
@@ -218,10 +217,12 @@ export const api = {
   deleteRule: (id: number) => request<void>("DELETE", `/api/rules/${id}`),
   channels: (norad: number) => request<Channel[]>("GET", `/api/satellites/${norad}/channels`),
   allChannels: () => request<Channel[]>("GET", "/api/channels"),
+  previewSteps: (b: ChannelIn) => request<{ steps: PipelineStep[] }>("POST", "/api/channels/preview-steps", b),
   channelOptions: () => request<ChannelOptions>("GET", "/api/channels/options"),
   createChannel: (norad: number, b: ChannelIn) => request<Channel>("POST", `/api/satellites/${norad}/channels`, b),
   updateChannel: (id: number, b: ChannelIn) => request<Channel>("PUT", `/api/channels/${id}`, b),
   deleteChannel: (id: number) => request<void>("DELETE", `/api/channels/${id}`),
+  unschedulePass: (id: number) => request<{ cancelled: boolean }>("POST", `/api/passes/${id}/unschedule`),
   schedulePass: (b: { norad_id: number; aos: string; los: string; channel_id?: number | null; priority?: number }) =>
     request<{ rule_id: number; pass_id: number; status: string }>("POST", "/api/passes/schedule", b),
   timedEvents: () => request<TimedEvent[]>("GET", "/api/timed-events"),

@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { api, Observer, Pass, Pipeline, Profile, RecorderStatus, Recording, Satellite, ToolsInfo } from "./api";
+import { api, Observer, Pass, RecorderStatus, Recording, Satellite, ToolsInfo } from "./api";
 import { fmt, mb, useAsync } from "./hooks";
 import DashboardPage from "./DashboardPage";
 import EventsPage from "./EventsPage";
@@ -101,20 +101,8 @@ function RecordingsPage() {
   const status = useAsync<RecorderStatus>(() => api.recorderStatus());
   const [form, setForm] = useState({ freq: "145.800", rate: "250", bw: "", duration: "30", gain: "", kind: "iq", fmMode: "fm", squelch: "0" });
   const [error, setError] = useState<string>();
-  const pipelines = useAsync<Pipeline[]>(() => api.pipelines());
-  const [pipelineId, setPipelineId] = useState("");
-  const [info, setInfo] = useState<string>();
   const [detailId, setDetailId] = useState<number>();
   const busy = status.data !== undefined && status.data.state !== "idle";
-  const runnable = pipelines.data?.filter((p) => p.steps.length > 0) ?? [];
-  const process = async (recId: number) => {
-    try {
-      const r = await api.processRecording(recId, Number(pipelineId || runnable[0]?.id));
-      setInfo(t("processStarted", { id: r.job_id }));
-      setError(undefined);
-    } catch (e) { setError((e as Error).message); }
-  };
-
   useEffect(() => {
     const id = setInterval(() => { status.reload(); recs.reload(); }, busy ? 1000 : 5000);
     return () => clearInterval(id);
@@ -185,17 +173,6 @@ function RecordingsPage() {
       {(error || recs.error || status.data?.last_error) && (
         <p className="err">{t("error")}: {error ?? recs.error ?? status.data?.last_error}</p>
       )}
-      {runnable.length > 0 && (
-        <div className="row">
-          <label>
-            {t("pipeline")}
-            <select value={pipelineId} onChange={(e) => setPipelineId(e.target.value)}>
-              {runnable.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-            </select>
-          </label>
-          {info && <span>{info}</span>}
-        </div>
-      )}
       <table>
         <thead>
           <tr><th>{t("started")}</th><th>{t("freqMhz")}</th><th>{t("sampleRate")}</th><th>{t("format")}</th><th>{t("size")}</th><th /></tr>
@@ -210,7 +187,6 @@ function RecordingsPage() {
               <td>{mb(r.size_bytes)}</td>
               <td>
                 <button onClick={() => setDetailId(r.id)}>{t("details")}</button>{" "}
-                {!r.deleted && runnable.length > 0 && <button onClick={() => process(r.id)}>{t("process")}</button>}{" "}
                 <button
                   disabled={status.data?.recording_id === r.id}
                   onClick={() => window.confirm(t("confirmDelete")) && api.deleteRecording(r.id).then(recs.reload).catch((e) => setError(e.message))}

@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 import type { Pass } from "./api";
 import { fmt } from "./hooks";
 import { useNow } from "./stream";
-import SchedulePassPanel from "./SchedulePassPanel";
+import SchedulePassPanel, { UnschedulePanel } from "./SchedulePassPanel";
 
 const COLORS: Record<string, string> = {
   planned: "#3a7bd5", unscheduled: "#8a8f9855", partial: "#e0a030", skipped_conflict: "#8a8f98", unsupported: "#8a8f98", recording: "#d33",
@@ -105,6 +105,7 @@ export default function PassTimeline({ passes, hours, onScheduled }: { passes: P
             {sel.rec_start && sel.rec_end && <> · {t("recWindow")}: {new Date(sel.rec_start).toLocaleTimeString()} – {new Date(sel.rec_end).toLocaleTimeString()}</>}
           </div>
           {sel.status === "unscheduled" && sel.norad_id !== null && <SchedulePassPanel pass={sel} onDone={() => { setSelected(undefined); onScheduled?.(); }} />}
+          {sel.single && (sel.status === "planned" || sel.status === "partial") && <UnschedulePanel pass={sel} onDone={() => { setSelected(undefined); onScheduled?.(); }} />}
         </div>
       )}
       {passes.length === 0 && <p className="muted">{t("noPasses")}</p>}

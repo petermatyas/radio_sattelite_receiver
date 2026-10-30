@@ -62,6 +62,7 @@ def recompute_passes(session: Session, settings: Settings, resources: dict[str, 
     horizon = now + timedelta(hours=settings.scheduling.horizon_hours)
     sched = settings.scheduling
 
+    session.execute(delete(WatchRule).where(WatchRule.single_pass, WatchRule.valid_to < now - timedelta(days=7)))   # lejárt egyedi szabályok
     session.execute(delete(Pass).where(Pass.status.in_(REPLACEABLE), Pass.los >= now))
     kept = session.scalars(select(Pass).where(Pass.status.in_(KEPT), Pass.los >= now - timedelta(hours=1))).all()
     fixed = [Fixed(p.device or "", p.rec_start, p.rec_end) for p in kept
