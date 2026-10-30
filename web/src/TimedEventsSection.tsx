@@ -96,7 +96,6 @@ export default function TimedEventsSection() {
   return (
     <section>
       <h2>{t("timedEvents")}</h2>
-      <p className="muted">{t("timedEventsHint")}</p>
       <form className="row" onSubmit={submit}>
         <label>{t("name")}<input required value={form.name} onChange={(e) => set("name", e.target.value)} /></label>
         <label>{t("profile")}

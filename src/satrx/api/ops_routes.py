@@ -19,7 +19,7 @@ from satrx.recording import sigmf
 from satrx.recording.orbit import load_orbit
 from satrx.pipeline.runner import PipelineError
 from satrx.storage import service as storage_service
-from satrx.tools import configured_satdump, find_satdump, save_satdump_path
+from satrx.tools import RTL_KEYS, apply_stored_tools, configured_satdump, find_rtl_tool, find_satdump, save_tool_paths
 
 router = APIRouter(prefix="/api", dependencies=[Depends(require_auth)])
 _UNACKED = Event.acknowledged.is_(False)
@@ -332,13 +332,20 @@ def delete_artifact(artifact_id: int, request: Request, session: Session = Depen
 
 class ToolsIn(BaseModel):
     satdump_path: str | None = None
+    rtl_sdr_path: str | None = None
+    rtl_fm_path: str | None = None
 
 
 def _tools_out(session: Session, settings: Settings) -> dict[str, Any]:
     info = find_satdump(session, settings)
     configured, source = configured_satdump(session, settings)
-    return {"satdump_path": configured, "configured_from": source,
-            "satdump": {"found": info.found, "path": info.command[0] if info.command else None, "source": info.source}}
+    out: dict[str, Any] = {"satdump_path": configured, "configured_from": source,
+                           "satdump": {"found": info.found, "path": info.command[0] if info.command else None, "source": info.source}}
+    for name in ("rtl_sdr", "rtl_fm"):
+        command = find_rtl_tool(name, settings)
+        out[f"{name}_path"] = getattr(settings.tools, f"{name}_path")
+        out[name] = {"found": command is not None, "path": command[0] if command else None}
+    return out
 
 
 @router.get("/settings/tools")
@@ -348,13 +355,19 @@ def read_tools(session: Session = Depends(get_session), settings: Settings = Dep
 
 @router.put("/settings/tools")
 def write_tools(body: ToolsIn, session: Session = Depends(get_session), settings: Settings = Depends(get_settings_dep)):
-    value = (body.satdump_path or "").strip() or None
-    if value is not None:
-        import shutil
-        from pathlib import Path
-        if not Path(value).expanduser().is_file() and shutil.which(value) is None:
+    import shutil
+    from pathlib import Path
+
+    changes: dict[str, str | None] = {}
+    for key in ("satdump_path", *RTL_KEYS):
+        if key not in body.model_fields_set:
+            continue                                       # a nem küldött útvonal változatlan marad
+        value = (getattr(body, key) or "").strip() or None
+        if value is not None and not Path(value).expanduser().is_file() and shutil.which(value) is None:
             raise HTTPException(422, f"No such executable: {value}")
-    save_satdump_path(session, value)
+        changes[key] = value
+    save_tool_paths(session, changes)
+    apply_stored_tools(session, settings)
     return _tools_out(session, settings)
 
 

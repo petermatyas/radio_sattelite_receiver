@@ -32,6 +32,31 @@ cd web && npm install && npm run build && cd ..
 Alapból a `mock` SDR fut (hardver nélkül is kipróbálható); a valódi eszközhöz `sdr.backend: rtlsdr`
 a `config/local.yaml` fájlban (példa: `config/local.yaml.example`).
 
+## Az `rtl_sdr` és `rtl_fm` programok (RTL-SDR)
+
+A valódi vételhez a satrx a külső `rtl_sdr` (nyers IQ) és `rtl_fm` (közvetlen hang) parancssori programokat is használhatja
+(`sdr.backend: rtl_sdr`). Ezek nem szkriptek, hanem kész programok (`rtl_sdr.exe`, `rtl_fm.exe`, `rtl_test.exe`, a `rtlsdr.dll`-lel együtt).
+
+**Honnan töltsd le**
+* **Windows:** az rtl-sdr-blog kiadásai (a V3/V4 vevőkhöz is jó): <https://github.com/rtlsdrblog/rtl-sdr-blog/releases>.
+  Töltsd le a Windowsra szóló zip-et (pl. `Release.zip`), csomagold ki egy rövid útvonalú mappába (pl. `C:\rtl-sdr`); a program az `x64` almappában van.
+  Alternatíva: az Osmocom saját fordításai: <https://ftp.osmocom.org/binaries/windows/rtl-sdr/>.
+* **WinUSB-illesztő (Windowson kell):** Zadig, <https://zadig.akeo.ie/>. Options → List All Devices → „Bulk-In, Interface (Interface 0)" → WinUSB → Replace Driver.
+* **Linux / Raspberry Pi:** `sudo apt install rtl-sdr` (a telepítő szkript ezt is elvégzi). A forráskód: <https://osmocom.org/projects/rtl-sdr/wiki>.
+
+**Beállítás**
+1. Tedd az `x64` mappát a PATH-ba, vagy add meg az útvonalat a webes felületen (Beállítások → Külső programok), illetve a `config/local.yaml`-ben:
+   ```yaml
+   sdr:
+     backend: rtl_sdr
+   tools:
+     rtl_sdr_path: C:\rtl-sdr\x64\rtl_sdr.exe
+     rtl_fm_path: C:\rtl-sdr\x64\rtl_fm.exe
+   ```
+2. Ellenőrzés: `.venv\Scripts\python -m satrx doctor`. Közvetlenül a programmal: `rtl_test -t` (az eszköz látszik-e).
+
+A linkek a leírás írásakor nem lettek újra megnyitva; ha az oldal változott, keresd az „rtl-sdr-blog releases" vagy „rtl-sdr windows binaries" kifejezésre.
+
 ## Raspberry Pi
 
 ```bash

@@ -288,3 +288,9 @@ def test_manual_recording_bandwidth_is_stored_and_used_by_the_demodulator(env):
     assert app.state.executor.wait_idle(60)
     art = client.get(f"/api/jobs/{job['job_id']}").json()["artifacts"][0]
     assert art["meta"]["bandwidth_hz"] == 12_500
+
+
+def test_tle_refresh_reports_whether_anything_changed(env):
+    client, _ = env
+    same = client.post("/api/satellites/25544/refresh-tle").json()
+    assert same["changed"] is False and same["previous_epoch"] == same["tle_epoch"]

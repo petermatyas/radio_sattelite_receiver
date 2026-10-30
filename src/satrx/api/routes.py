@@ -30,6 +30,11 @@ class SatelliteIn(BaseModel):
     norad_id: int = Field(gt=0)
 
 
+class SatelliteRefreshOut(SatelliteOut):
+    changed: bool                         # az új TLE epochája eltér a korábbitól
+    previous_epoch: datetime | None
+
+
 class SatellitePatch(BaseModel):
     enabled: bool
 
@@ -104,15 +109,17 @@ def delete_satellite(norad_id: int, request: Request, session: Session = Depends
     scheduler_of(request).recompute()
 
 
-@router.post("/satellites/{norad_id}/refresh-tle", response_model=SatelliteOut)
+@router.post("/satellites/{norad_id}/refresh-tle", response_model=SatelliteRefreshOut)
 def refresh_tle(norad_id: int, request: Request, session: Session = Depends(get_session)):
     sat = _get_sat(session, norad_id)
+    previous = sat.tle_epoch
     try:
         tle_service.refresh_tle(session, sat, _fetcher(request))
     except TleError as exc:
         raise HTTPException(502, str(exc))
     scheduler_of(request).recompute()
-    return sat
+    return SatelliteRefreshOut.model_validate({"norad_id": sat.norad_id, "name": sat.name, "tle_epoch": sat.tle_epoch,
+                                               "enabled": sat.enabled, "changed": sat.tle_epoch != previous, "previous_epoch": previous})
 
 
 @router.get("/settings/observer", response_model=ObserverIO | None)

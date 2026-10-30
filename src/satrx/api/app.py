@@ -21,6 +21,7 @@ from satrx.core.db import make_engine, make_session_factory, run_migrations
 from satrx import sdnotify
 from satrx.core.events import EventLog
 from satrx.core.recovery import recover_after_crash
+from satrx.tools import apply_stored_tools
 from satrx.core.logging import setup_logging
 from satrx.core.seed import seed_defaults
 from satrx.pipeline.registry import default_registry
@@ -67,6 +68,8 @@ def create_app(settings: Settings | None = None, tle_fetcher=fetch_tle, startup_
         app.state.events = events = EventLog(app.state.session_factory)
         app.state.storage = storage = StorageManager(settings, app.state.session_factory)
         storage.ensure_roots()
+        with app.state.session_factory() as _s:
+            apply_stored_tools(_s, settings)
         recover_after_crash(app.state.session_factory, storage, events,
                             extra_part_dirs=[settings.data_path / "exports"])
         app.state.registry = default_registry(PROJECT_ROOT / "plugins")

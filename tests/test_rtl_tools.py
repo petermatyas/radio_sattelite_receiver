@@ -172,3 +172,27 @@ def test_rtl_fm_is_refused_with_the_simulated_backend_or_a_missing_program(tmp_p
     with TestClient(_app(tmp_path / "b", fake_rtl, fm_path=str(tmp_path / "nope" / "rtl_fm"))) as client:
         r = client.post("/api/recorder/start-fm", json={"center_freq_hz": 446_006_250, "duration_s": 2})
         assert r.status_code == 422 and "rtl_fm" in r.text
+
+
+def test_tool_paths_can_be_set_from_the_api_and_survive_a_restart(tmp_path, fake_rtl):
+    bad = str(tmp_path / "nope.exe")
+    s = Settings(data_dir=tmp_path / "data")
+    s.sdr = SdrConfig(backend="rtl_sdr")
+    with TestClient(create_app(s, tle_fetcher=_fetch, startup_refresh=False, scheduler_enabled=False)) as client:
+        assert client.get("/api/settings/tools").json()["rtl_sdr"]["found"] is False
+        assert client.put("/api/settings/tools", json={"rtl_sdr_path": bad}).status_code == 422
+        out = client.put("/api/settings/tools", json={"rtl_sdr_path": str(fake_rtl.paths["rtl_sdr"]),
+                                                      "rtl_fm_path": str(fake_rtl.paths["rtl_fm"])}).json()
+        assert out["rtl_sdr"]["found"] and out["rtl_fm"]["found"] and out["satdump"]["found"] is False
+        # a satdump mentése nem törli az rtl útvonalakat (és fordítva)
+        assert client.put("/api/settings/tools", json={"satdump_path": ""}).json()["rtl_sdr"]["found"]
+        # azonnal érvényes: felvétel indítható újraindítás nélkül
+        assert client.post("/api/recorder/start", json={"center_freq_hz": 100_000_000, "sample_rate_hz": 250_000,
+                                                         "duration_s": 1}).status_code == 202
+        _wait_idle(client)
+        assert client.get("/api/recordings").json()[0]["source"] == "rtl_sdr"
+    s2 = Settings(data_dir=tmp_path / "data")                      # újraindítás: a mentett útvonal betöltődik
+    s2.sdr = SdrConfig(backend="rtl_sdr")
+    with TestClient(create_app(s2, tle_fetcher=_fetch, startup_refresh=False, scheduler_enabled=False)) as client:
+        assert client.get("/api/settings/tools").json()["rtl_fm"]["found"]
+        assert client.put("/api/settings/tools", json={"rtl_fm_path": ""}).json()["rtl_fm"]["found"] is False

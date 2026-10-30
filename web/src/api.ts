@@ -1,4 +1,5 @@
 export interface Satellite { norad_id: number; name: string; tle_epoch: string | null; enabled: boolean }
+export interface SatelliteRefresh extends Satellite { changed: boolean; previous_epoch: string | null }
 export interface Pass {
   id: number; norad_id: number | null; satellite_name: string; kind: "pass" | "event"; event_id: number | null;
   aos: string; tca: string; los: string; rec_start: string | null; rec_end: string | null;
@@ -93,7 +94,10 @@ export interface RecordingDetailData {
 export interface ToolsInfo {
   satdump_path: string | null; configured_from: string;
   satdump: { found: boolean; path: string | null; source: string };
+  rtl_sdr_path: string | null; rtl_fm_path: string | null;
+  rtl_sdr: { found: boolean; path: string | null }; rtl_fm: { found: boolean; path: string | null };
 }
+export type ToolPaths = { satdump_path: string | null; rtl_sdr_path: string | null; rtl_fm_path: string | null };
 export interface StorageRootInfo {
   id: number; kind: "recordings" | "artifacts"; path: string; label: string; active: boolean; available: boolean;
   used_bytes: number; free_bytes: number | null;
@@ -176,7 +180,7 @@ export const api = {
   addSatellite: (norad_id: number) => request<Satellite>("POST", "/api/satellites", { norad_id }),
   patchSatellite: (id: number, enabled: boolean) => request<Satellite>("PATCH", `/api/satellites/${id}`, { enabled }),
   deleteSatellite: (id: number) => request<void>("DELETE", `/api/satellites/${id}`),
-  refreshTle: (id: number) => request<Satellite>("POST", `/api/satellites/${id}/refresh-tle`),
+  refreshTle: (id: number) => request<SatelliteRefresh>("POST", `/api/satellites/${id}/refresh-tle`),
   passes: (hours = 48) => request<Pass[]>("GET", `/api/passes?hours=${hours}`),
   recorderStatus: () => request<RecorderStatus>("GET", "/api/recorder/status"),
   startRecording: (b: StartRecording) => request<Recording>("POST", "/api/recorder/start", b),
@@ -223,7 +227,7 @@ export const api = {
   runSteps: (id: number, steps: { processor: string; params: Record<string, unknown> }[]) =>
     request<{ job_id: number }>("POST", `/api/recordings/${id}/run`, { steps }),
   tools: () => request<ToolsInfo>("GET", "/api/settings/tools"),
-  setTools: (satdump_path: string | null) => request<ToolsInfo>("PUT", "/api/settings/tools", { satdump_path }),
+  setTools: (paths: Partial<ToolPaths>) => request<ToolsInfo>("PUT", "/api/settings/tools", paths),
   storage: () => request<StorageOverview>("GET", "/api/storage"),
   validatePath: (path: string) => request<ValidationResult>("POST", "/api/storage/validate", { path }),
   setRoots: (b: { recordings_path?: string; artifacts_path?: string }) => request<StorageOverview>("PUT", "/api/storage/roots", b),

@@ -11,7 +11,7 @@ import PassTimeline from "./PassTimeline";
 import SchedulePage from "./SchedulePage";
 import StoragePage from "./StoragePage";
 import { StatusBar, Toasts } from "./StatusBar";
-import { useStream } from "./stream";
+import { useNow, useStream } from "./stream";
 
 type Tab = "dashboard" | "passes" | "recordings" | "gallery" | "storage" | "events" | "settings";
 type Sub = "plan" | "satellites" | "schedule";
@@ -226,10 +226,12 @@ function SatellitesPage() {
   const sats = useAsync<Satellite[]>(() => api.satellites());
   const [noradId, setNoradId] = useState("");
   const [error, setError] = useState<string>();
+  const [info, setInfo] = useState<string>();
+  const now = useNow(60_000);
 
   const run = async (fn: () => Promise<unknown>): Promise<boolean> => {
     let ok = true;
-    try { await fn(); setError(undefined); } catch (e) { setError((e as Error).message); ok = false; }
+    try { await fn(); setError(undefined); } catch (e) { setError((e as Error).message); ok = false; setInfo(undefined); }
     sats.reload();
     return ok;
   };
@@ -249,6 +251,7 @@ function SatellitesPage() {
         </label>
         <button type="submit">{t("add")}</button>
       </form>
+      {info && <p className="st-done">{info}</p>}
       {(error || sats.error) && <p className="err">{t("error")}: {error ?? sats.error}</p>}
       <table>
         <thead>
@@ -261,12 +264,15 @@ function SatellitesPage() {
             <tr key={s.norad_id}>
               <td>{s.name}</td>
               <td>{s.norad_id}</td>
-              <td>{s.tle_epoch ? fmt(s.tle_epoch) : "-"}</td>
+              <td>{s.tle_epoch ? `${fmt(s.tle_epoch)} (${t("tleAgeHours", { n: Math.max(0, Math.round((now - new Date(s.tle_epoch).getTime()) / 3600_000)) })})` : "-"}</td>
               <td>
                 <input type="checkbox" checked={s.enabled} onChange={(e) => run(() => api.patchSatellite(s.norad_id, e.target.checked))} />
               </td>
               <td>
-                <button onClick={() => run(() => api.refreshTle(s.norad_id))}>{t("refreshTle")}</button>{" "}
+                <button onClick={() => run(async () => {
+                  const r = await api.refreshTle(s.norad_id);
+                  setInfo(t(r.changed ? "tleUpdated" : "tleUnchanged", { name: r.name, epoch: r.tle_epoch ? fmt(r.tle_epoch) : "-" }));
+                })}>{t("refreshTle")}</button>{" "}
                 <button onClick={() => run(() => api.deleteSatellite(s.norad_id))}>{t("remove")}</button>
               </td>
             </tr>
@@ -279,34 +285,52 @@ function SatellitesPage() {
 
 function ToolsSection() {
   const { t } = useTranslation();
-  const [value, setValue] = useState("");
+  const [values, setValues] = useState({ satdump_path: "", rtl_sdr_path: "", rtl_fm_path: "" });
   const [info, setInfo] = useState<ToolsInfo>();
   const [error, setError] = useState<string>();
-  useEffect(() => {
-    api.tools().then((i) => { setInfo(i); setValue(i.satdump_path ?? ""); }).catch((e) => setError(e.message));
-  }, []);
+  const [saved, setSaved] = useState(false);
+  const load = (i: ToolsInfo) => {
+    setInfo(i);
+    setValues({ satdump_path: i.satdump_path ?? "", rtl_sdr_path: i.rtl_sdr_path ?? "", rtl_fm_path: i.rtl_fm_path ?? "" });
+  };
+  useEffect(() => { api.tools().then(load).catch((e) => setError(e.message)); }, []);
   const save = async (e: React.FormEvent) => {
     e.preventDefault();
-    try { setInfo(await api.setTools(value.trim() || null)); setError(undefined); } catch (err) { setError((err as Error).message); }
+    const clean = (v: string) => v.trim() || null;
+    try {
+      load(await api.setTools({
+        satdump_path: clean(values.satdump_path), rtl_sdr_path: clean(values.rtl_sdr_path), rtl_fm_path: clean(values.rtl_fm_path),
+      }));
+      setError(undefined); setSaved(true); setTimeout(() => setSaved(false), 3000);
+    } catch (err) { setError((err as Error).message); }
   };
+  const row = (key: keyof typeof values, label: string, placeholder: string, found?: { found: boolean; path: string | null }, extra?: string) => (
+    <div style={{ width: "100%" }}>
+      <label style={{ display: "block" }}>
+        {label}
+        <input style={{ width: "100%" }} value={values[key]} placeholder={placeholder}
+          onChange={(e) => setValues({ ...values, [key]: e.target.value })} />
+      </label>
+      {found && (
+        <small className={found.found ? "muted" : "hint"}>
+          {found.found ? t("toolFound", { path: found.path }) : t("toolNotFound")}{extra}
+        </small>
+      )}
+    </div>
+  );
   return (
     <section>
       <h2>{t("tools")}</h2>
       <form className="row" onSubmit={save}>
-        <label style={{ flex: 1, minWidth: "20rem" }}>
-          {t("satdumpPath")}
-          <input value={value} onChange={(e) => setValue(e.target.value)} placeholder={t("satdumpPlaceholder")} />
-        </label>
+        {row("rtl_sdr_path", t("rtlSdrPath"), t("rtlSdrPlaceholder"), info?.rtl_sdr)}
+        {row("rtl_fm_path", t("rtlFmPath"), t("rtlFmPlaceholder"), info?.rtl_fm)}
+        {row("satdump_path", t("satdumpPath"), t("satdumpPlaceholder"), info?.satdump,
+          info?.satdump.found ? ` (${t(`src_${info.satdump.source}`, { defaultValue: info.satdump.source })})` : undefined)}
         <button type="submit">{t("save")}</button>
+        {saved && <span className="st-done">{t("saved")}</span>}
       </form>
+      <p className="muted">{t("toolsHint")}</p>
       {error && <p className="err">{t("error")}: {error}</p>}
-      {info && (
-        <p className={info.satdump.found ? "" : "hint"}>
-          {info.satdump.found
-            ? t("satdumpFound", { path: info.satdump.path, source: t(`src_${info.satdump.source}`, { defaultValue: info.satdump.source }) })
-            : t("satdumpNotFound")}
-        </p>
-      )}
     </section>
   );
 }

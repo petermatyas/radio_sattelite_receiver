@@ -66,9 +66,29 @@ def find_satdump(session: Session | None, settings: Settings) -> ToolInfo:
     return ToolInfo(None, "none", None)
 
 
-def save_satdump_path(session: Session, value: str | None) -> None:
-    session.merge(Setting(key=TOOLS_KEY, value={"satdump_path": value or None}))
+RTL_KEYS = ("rtl_sdr_path", "rtl_fm_path")
+
+
+def save_tool_paths(session: Session, values: dict[str, str | None]) -> None:
+    """A megadott útvonalak mentése (a többi megmarad)."""
+    stored = session.get(Setting, TOOLS_KEY)
+    merged = {**(stored.value if stored is not None and stored.value else {}), **{k: v or None for k, v in values.items()}}
+    session.merge(Setting(key=TOOLS_KEY, value=merged))
     session.commit()
+
+
+def save_satdump_path(session: Session, value: str | None) -> None:
+    save_tool_paths(session, {"satdump_path": value})
+
+
+def apply_stored_tools(session: Session, settings: Settings) -> None:
+    """A felületen mentett rtl_sdr / rtl_fm útvonalak felülírják a YAML-t (az eszközréteg a `settings.tools`-t olvassa)."""
+    stored = session.get(Setting, TOOLS_KEY)
+    if stored is None or not stored.value:
+        return
+    for key in RTL_KEYS:
+        if key in stored.value:
+            setattr(settings.tools, key, stored.value[key])
 
 
 def _rtl_locations(name: str) -> list[Path]:

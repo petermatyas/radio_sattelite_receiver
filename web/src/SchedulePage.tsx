@@ -169,13 +169,25 @@ function RulesSection() {
   );
 }
 
+type Part = "rules" | "events" | "profiles" | "pipelines";
+const PARTS: Part[] = ["rules", "events", "profiles", "pipelines"];
+
+/** Ütemezés: mit és mikor vegyen fel a rendszer. Négy külön, átlátható rész; egyszerre mindig csak egy látszik. */
 export default function SchedulePage() {
+  const { t } = useTranslation();
+  const [part, setPart] = useState<Part>("rules");
   return (
     <>
-      <RulesSection />
-      <TimedEventsSection />
-      <ProfilesSection />
-      <PipelinesPage />
+      <div className="row subtabs">
+        {PARTS.map((p) => (
+          <button key={p} className={`tab ${part === p ? "active" : ""}`} onClick={() => setPart(p)}>{t(`part_${p}`)}</button>
+        ))}
+      </div>
+      <p className="muted">{t(`partHint_${part}`)}</p>
+      {part === "rules" && <RulesSection />}
+      {part === "events" && <TimedEventsSection />}
+      {part === "profiles" && <ProfilesSection />}
+      {part === "pipelines" && <PipelinesPage />}
     </>
   );
 }
