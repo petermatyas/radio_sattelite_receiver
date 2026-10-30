@@ -19,6 +19,13 @@ from satrx.scheduler.occurrences import get_zone, next_occurrences
 router = APIRouter(prefix="/api", dependencies=[Depends(require_auth)])
 
 
+def _refuse_if_managed(session: Session, column, id_: int) -> None:
+    """A műhold frekvenciájához (csatornájához) tartozó profilt és pipeline-t a csatorna tartja karban: ott kell törölni."""
+    ch = session.scalars(select(SatelliteChannel).where(column == id_)).first()
+    if ch is not None:
+        raise HTTPException(409, f"It belongs to the frequency '{ch.name}' of a satellite: delete or change it on the Satellites page")
+
+
 def _commit(session: Session) -> None:
     try:
         session.commit()
@@ -137,6 +144,7 @@ def update_profile(id_: int, body: ProfileIn, request: Request, session: Session
 
 @router.delete("/profiles/{id_}", status_code=204)
 def delete_profile(id_: int, session: Session = Depends(get_session)):
+    _refuse_if_managed(session, SatelliteChannel.profile_id, id_)
     session.delete(_get(session, RadioProfile, id_))
     _commit(session)
 
@@ -181,6 +189,7 @@ def update_pipeline(id_: int, body: PipelineIn, request: Request, session: Sessi
 
 @router.delete("/pipelines/{id_}", status_code=204)
 def delete_pipeline(id_: int, session: Session = Depends(get_session)):
+    _refuse_if_managed(session, SatelliteChannel.pipeline_id, id_)
     session.delete(_get(session, Pipeline, id_))
     _commit(session)
 

@@ -365,6 +365,9 @@ def write_tools(body: ToolsIn, session: Session = Depends(get_session), settings
         value = (getattr(body, key) or "").strip() or None
         if value is not None and not Path(value).expanduser().is_file() and shutil.which(value) is None:
             raise HTTPException(422, f"No such executable: {value}")
+        expected = {"satdump_path": ("satdump", "satdump-ui"), "rtl_sdr_path": ("rtl_sdr",), "rtl_fm_path": ("rtl_fm",)}[key]
+        if value is not None and Path(value).stem.lower() not in expected:
+            raise HTTPException(422, f"The program must be named {' or '.join(expected)} (got {Path(value).name})")
         changes[key] = value
     save_tool_paths(session, changes)
     apply_stored_tools(session, settings)

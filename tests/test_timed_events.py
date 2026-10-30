@@ -1,4 +1,5 @@
 """Időalapú (NORAD ID nélküli) események: előfordulások, API, ütemezés, végrehajtás, konzol-események."""
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -8,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from satrx.api.app import create_app
+from satrx.core.config import SdrConfig, Settings
 from satrx.core.models import Pass
 from satrx.recording import sigmf
 from satrx.scheduler.occurrences import get_zone, next_occurrences, occurrences
@@ -441,3 +443,40 @@ def test_one_predicted_pass_can_be_scheduled_with_a_chosen_channel(env):
     mid = dt.fromisoformat(gap["los"].replace("Z", "+00:00")) + timedelta(minutes=20)
     assert client.post("/api/passes/schedule", json={"norad_id": 25544, "aos": mid.isoformat(), "los": (mid + timedelta(minutes=5)).isoformat()}).status_code == 409
     assert len(client.get("/api/rules").json()) == n_rules
+
+
+def test_review_fixes_managed_profiles_and_stable_ids(env):
+    client, _ = env
+    ch = client.post("/api/satellites/25544/channels", json={"center_freq_hz": 145_800_000, "mode": "fm"}).json()
+    # a karbantartott profil / pipeline nem törölhető a Profilok / Pipeline-ok oldalról
+    assert client.delete(f"/api/profiles/{ch['profile_id']}").status_code == 409
+    assert client.delete(f"/api/pipelines/{ch['pipeline_id']}").status_code == 409
+    # időpontos esemény használja a csatorna profilját: a műhold törlése 409, nem 500
+    ev = client.post("/api/timed-events", json={"name": "x", "start_at": (datetime.now(UTC) + timedelta(hours=2)).isoformat(), "duration_s": 60,
+                                                "profile_id": ch["profile_id"], "pipeline_id": ch["pipeline_id"]})
+    assert ev.status_code == 201
+    assert client.delete("/api/satellites/25544").status_code == 409
+    client.delete(f"/api/timed-events/{ev.json()['id']}")
+    # az ütemezetlen átvonulások azonosítója nem függ a lista hosszától
+    long = {p["aos"][:16]: p["id"] for p in client.get("/api/passes", params={"hours": 72, "unscheduled": True}).json()}
+    short = {p["aos"][:16]: p["id"] for p in client.get("/api/passes", params={"hours": 24, "unscheduled": True}).json()}
+    assert short and all(long.get(k) == v for k, v in short.items()) and len(set(long.values())) == len(long)
+
+
+def test_tool_paths_must_have_the_expected_program_name(tmp_path):
+    import shutil
+    other = tmp_path / "notepad.exe"
+    shutil.copy(sys.executable, other)
+    s = Settings(data_dir=tmp_path / "d")
+    with TestClient(create_app(s, tle_fetcher=_fetch, startup_refresh=False, scheduler_enabled=False)) as client:
+        r = client.put("/api/settings/tools", json={"rtl_fm_path": str(other)})
+        assert r.status_code == 422 and "rtl_fm" in r.text
+
+
+def test_rtl_sdr_backend_does_not_retune_during_a_pass():
+    from satrx.scheduler.service import Scheduler
+    s = Settings()
+    s.sdr = SdrConfig(backend="rtl_sdr")
+    assert Scheduler._retune_step(SimpleNamespace(_settings=s)) == 10**9
+    s.sdr = SdrConfig(backend="rtlsdr")
+    assert Scheduler._retune_step(SimpleNamespace(_settings=s)) == s.scheduling.retune_step_hz

@@ -4,12 +4,12 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from satrx.api.deps import get_session, get_settings_dep, require_auth
 from satrx.core.config import Settings
-from satrx.core.models import Pass, Pipeline, RadioProfile, Satellite, SatelliteChannel
+from satrx.core.models import Pass, Pipeline, RadioProfile, Satellite, SatelliteChannel, TimedEvent
 from satrx.passes.predictor import predict_passes
 from satrx.passes.service import get_observer, set_observer
 from satrx.scheduler.service import Scheduler
@@ -118,6 +118,11 @@ def patch_satellite(norad_id: int, body: SatellitePatch, request: Request, sessi
 def delete_satellite(norad_id: int, request: Request, session: Session = Depends(get_session)):
     sat = _get_sat(session, norad_id)
     owned = [(c.profile_id, c.pipeline_id) for c in session.scalars(select(SatelliteChannel).where(SatelliteChannel.norad_id == norad_id))]
+    for profile_id, pipeline_id in owned:
+        used = session.scalar(select(func.count()).select_from(TimedEvent).where(
+            (TimedEvent.profile_id == profile_id) | (TimedEvent.pipeline_id == pipeline_id))) or 0
+        if used:
+            raise HTTPException(409, f"{used} timed event(s) use this satellite's frequencies: delete those first")
     session.delete(sat)
     session.flush()
     for profile_id, pipeline_id in owned:          # a csatornák karbantartott profiljai és pipeline-jai is törlődnek
@@ -195,7 +200,7 @@ def list_passes(hours: int = 48, unscheduled: bool = False, session: Session = D
 def _unscheduled_passes(session: Session, settings: Settings, now: datetime, hours: int, scheduled) -> list[PassOut]:
     """A TLE-vel rendelkező műholdak átvonulásai, amelyekhez nincs ütemezett felvétel (tájékoztató, nem kerül felvételre).
 
-    Azonosító: negatív szám (nem adatbázis-sor). Az ütemezett átvonulással átfedő előrejelzést kihagyjuk.
+    Azonosító: negatív szám (nem adatbázis-sor), a műholdból és az AOS percéből képzett, így újratöltéskor sem változik. Az ütemezett átvonulással átfedő előrejelzést kihagyjuk.
     """
     observer = get_observer(session, settings)
     if observer is None:
@@ -214,7 +219,7 @@ def _unscheduled_passes(session: Session, settings: Settings, now: datetime, hou
         for p in predicted:
             if any(a < p.los and p.aos < b for a, b in taken):
                 continue
-            out.append(PassOut(id=-(len(out) + 1), norad_id=sat.norad_id, satellite_name=sat.name, kind="pass", rule_id=None,
+            out.append(PassOut(id=-(sat.norad_id * 1_000_000 + int(p.aos.timestamp() // 60) % 1_000_000), norad_id=sat.norad_id, satellite_name=sat.name, kind="pass", rule_id=None,
                                aos=p.aos, tca=p.tca, los=p.los, rec_start=None, rec_end=None,
                                max_elevation_deg=p.max_elevation_deg, status="unscheduled"))
     return out

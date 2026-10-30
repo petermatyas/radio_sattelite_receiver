@@ -109,12 +109,17 @@ class Scheduler:
             duration_s=(p.rec_end - now).total_seconds(), gain_db=profile.gain_db,
             fmt=self._recorder.native_format(), antenna=None,
             description=f"{sat.name} pass", doppler=doppler,
-            retune_step_hz=self._settings.scheduling.retune_step_hz, start_time=now,
+            retune_step_hz=self._retune_step(), start_time=now,
             orbit=self._orbit_context(sat, observer, profile, p, rule),
             extra_meta={"satrx:norad_id": sat.norad_id, "satrx:satellite": sat.name, "satrx:pass_id": p.id,
                         "satrx:max_elevation_deg": p.max_elevation_deg, "satrx:profile": profile.name},
         )
         return self._launch(session, p, spec, profile, pipeline, norad_id=sat.norad_id, label=sat.name)
+
+    def _retune_step(self) -> int:
+        """Az `rtl_sdr` backend újrahangolása a program újraindítása (mintakiesés), ezért ott nincs menet közbeni újrahangolás:
+        a rögzített sáv a Doppler-eltolódást befogadja, és a feldolgozás a pályametaadat görbéjét követi."""
+        return 10**9 if self._settings.sdr.backend == "rtl_sdr" else self._settings.scheduling.retune_step_hz
 
     def _start_event(self, session: Session, p: Pass, now: datetime) -> int | None:
         """Időalapú esemény: a profil frekvenciáján, a megadott időablakban; nincs műhold, Doppler és pályaadat."""

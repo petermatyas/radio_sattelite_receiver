@@ -180,13 +180,13 @@ def check_rtlsdr_windows(settings: Settings, system: str | None = None, run: Run
         return Check("usb_windows", INFO, "The USB devices could not be listed (PowerShell is not available)")
     rows = [line.split("|", 2) for line in out.splitlines() if line.count("|") >= 2]
     if not rows:
-        return Check("usb_windows", WARN if settings.sdr.backend == "rtlsdr" else INFO,
+        return Check("usb_windows", WARN if settings.sdr.backend in ("rtlsdr", "rtl_sdr") else INFO,
                      "No RTL-SDR (Realtek 0bda:2838 / 2832) USB device is connected to this computer",
                      "Plug the dongle in (preferably directly, not through a hub)")
     interfaces = [r for r in rows if "&MI_" in r[2]]
     broken = [r for r in (interfaces or rows) if r[0].strip().upper() not in ("OK",)]
     if broken:
-        level = FAIL if settings.sdr.backend == "rtlsdr" else WARN
+        level = FAIL if settings.sdr.backend in ("rtlsdr", "rtl_sdr") else WARN
         return Check("usb_windows", level,
                      "The RTL-SDR is connected, but Windows has no working driver for it (" + ", ".join(
                          sorted({f"{r[1].strip() or 'device'}: {r[0].strip()}" for r in broken})) + ")",
